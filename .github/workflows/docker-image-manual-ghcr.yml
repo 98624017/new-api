@@ -1,0 +1,173 @@
+name: Publish Docker image (manual GHCR)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (branch, tag, or commit SHA)"
+        required: false
+        default: "main"
+        type: string
+      push_latest:
+        description: "Also update ghcr latest tag"
+        required: false
+        default: false
+        type: boolean
+      reason:
+        description: "Optional reason for this manual build"
+        required: false
+        type: string
+
+jobs:
+  prepare:
+    name: Prepare build metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.prepare.outputs.ref }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      ghcr_repository: ${{ steps.prepare.outputs.ghcr_repository }}
+    steps:
+      - name: Check out target ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.ref || 'main' }}
+
+      - name: Resolve manual tag
+        id: prepare
+        run: |
+          REF_NAME="${{ inputs.ref || 'main' }}"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TAG="manual-$(date +'%Y%m%d')-${SHORT_SHA}"
+          GHCR_REPOSITORY="${GITHUB_REPOSITORY,,}"
+
+          echo "ref=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_repository=${GHCR_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Manual GHCR Docker Build"
+            echo ""
+            echo "- Ref: \`${REF_NAME}\`"
+            echo "- Tag: \`${TAG}\`"
+            echo "- Push latest: \`${{ inputs.push_latest }}\`"
+            if [ -n "${{ inputs.reason }}" ]; then
+              echo "- Reason: ${{ inputs.reason }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build_single_arch:
+    name: Build & push (${{ matrix.arch }}) [GHCR]
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out target ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Write VERSION for Docker build
+        run: echo "${{ needs.prepare.outputs.tag }}" > VERSION
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}
+
+      - name: Build & push single-arch image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign image with cosign
+        run: cosign sign --yes ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}@${{ steps.build.outputs.digest }}
+
+      - name: Output digest
+        run: |
+          echo "### Docker Image Digest (${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  create_manifests:
+    name: Create multi-arch manifests (GHCR)
+    needs: [prepare, build_single_arch]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create & push manifest (version)
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }} \
+            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-amd64 \
+            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-arm64
+
+      - name: Create & push manifest (latest)
+        if: ${{ inputs.push_latest }}
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest \
+            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-amd64 \
+            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-arm64
+
+      - name: Output manifest digest
+        run: |
+          echo "### Multi-arch Manifest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }} >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.push_latest }}" = "true" ]; then
+            echo "---" >> "$GITHUB_STEP_SUMMARY"
+            docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
