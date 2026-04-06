@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/bytedance/gopkg/util/gopool"
 
 	"gorm.io/gorm"
 )
@@ -115,7 +116,7 @@ func GetRedemptionById(id int) (*Redemption, error) {
 	return &redemption, err
 }
 
-func Redeem(key string, userId int) (quota int, err error) {
+func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redemption) error) (quota int, err error) {
 	if key == "" {
 		return 0, errors.New("未提供兑换码")
 	}
@@ -144,6 +145,12 @@ func Redeem(key string, userId int) (quota int, err error) {
 		if err != nil {
 			return err
 		}
+		if apply != nil {
+			err = apply(tx, redemption)
+			if err != nil {
+				return err
+			}
+		}
 		redemption.RedeemedTime = common.GetTimestamp()
 		redemption.Status = common.RedemptionCodeStatusUsed
 		redemption.UsedUserId = userId
@@ -156,6 +163,48 @@ func Redeem(key string, userId int) (quota int, err error) {
 	}
 	RecordLog(userId, LogTypeTopup, fmt.Sprintf("通过兑换码充值 %s，兑换码ID %d", logger.LogQuota(redemption.Quota), redemption.Id))
 	return redemption.Quota, nil
+}
+
+func Redeem(key string, userId int) (quota int, err error) {
+	return redeem(key, userId, nil)
+}
+
+func RedeemByToken(key string, userId int, tokenId int, tokenKey string) (quota int, err error) {
+	if tokenId == 0 || tokenKey == "" {
+		return 0, errors.New("无效的令牌")
+	}
+	quota, err = redeem(key, userId, func(tx *gorm.DB, redemption *Redemption) error {
+		result := tx.Model(&Token{}).Where("id = ? AND user_id = ?", tokenId, userId).Updates(
+			map[string]interface{}{
+				"remain_quota":  gorm.Expr("remain_quota + ?", redemption.Quota),
+				"used_quota":    gorm.Expr("used_quota - ?", redemption.Quota),
+				"accessed_time": common.GetTimestamp(),
+			},
+		)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errors.New("无效的令牌")
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if common.RedisEnabled {
+		gopool.Go(func() {
+			if err := cacheIncrUserQuota(userId, int64(quota)); err != nil {
+				common.SysLog("failed to increase user quota cache after token redeem: " + err.Error())
+			}
+		})
+		gopool.Go(func() {
+			if err := cacheIncrTokenQuota(tokenKey, int64(quota)); err != nil {
+				common.SysLog("failed to increase token quota cache after token redeem: " + err.Error())
+			}
+		})
+	}
+	return quota, nil
 }
 
 func (redemption *Redemption) Insert() error {

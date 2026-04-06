@@ -119,6 +119,13 @@ func getUserQuotaForTest(t *testing.T, userID int) int {
 	return user.Quota
 }
 
+func getTokenRemainQuotaForTest(t *testing.T, tokenID int) int {
+	t.Helper()
+	var token model.Token
+	require.NoError(t, model.DB.Select("remain_quota").Where("id = ?", tokenID).First(&token).Error)
+	return token.RemainQuota
+}
+
 func getRedemptionForTest(t *testing.T, key string) *model.Redemption {
 	t.Helper()
 	var redemption model.Redemption
@@ -153,6 +160,7 @@ func TestTokenRedeem_Success(t *testing.T) {
 	assert.Equal(t, "", resp.Message)
 	assert.Equal(t, redeemQuota, resp.Data)
 	assert.Equal(t, initQuota+redeemQuota, getUserQuotaForTest(t, userID))
+	assert.Equal(t, 1000+redeemQuota, getTokenRemainQuotaForTest(t, tokenID))
 
 	redemption := getRedemptionForTest(t, redeemKey)
 	assert.Equal(t, common.RedemptionCodeStatusUsed, redemption.Status)

@@ -34,11 +34,11 @@ git apply --3way patches/001-token-redeem-via-apikey.patch
 
 ## 001-token-redeem-via-apikey.patch
 
-**功能**：兑换码免登录兑换 — 通过 API Key (sk-xxx) 认证兑换，供 neko-api-key-tool 等外部工具使用。
+**功能**：兑换码免登录兑换 — 通过 API Key (sk-xxx) 认证兑换，供 neko-api-key-tool 等外部工具使用；兑换成功时同时补到用户钱包和当前 token/key 额度。
 
-**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session。此补丁新增 `POST /api/token/redeem`，使用 `TokenAuthReadOnly` 中间件，允许通过 Bearer sk-xxx 免登录兑换。
+**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session。此补丁新增 `POST /api/token/redeem`，使用 `TokenAuthReadOnly` 中间件，允许通过 Bearer sk-xxx 免登录兑换；并在兑换成功时同步增加当前 token 的额度，方便 API Key 二次分发场景维持账实一致。
 
-**涉及文件（2 个）**：
+**涉及文件（4 个）**：
 
 ### 1. `controller/user.go`
 
@@ -80,9 +80,19 @@ func TokenRedeem(c *gin.Context) {
 }
 ```
 
-**依赖**：复用同文件中已有的 `topUpRequest`、`getTopUpLock`，以及 `model.Redeem`、`common.ApiError` 等。无需新增 import。
+**依赖**：复用同文件中已有的 `topUpRequest`、`getTopUpLock`，以及 `model.RedeemByToken`、`common.ApiError` 等。
 
-### 2. `router/api-router.go`
+### 2. `model/redemption.go`
+
+新增 token 场景兑换逻辑 `RedeemByToken`：
+
+- 在同一事务内增加用户钱包 quota
+- 同时增加当前 token 的 `remain_quota`
+- 一并核销兑换码
+
+这样不会出现“钱包加了但 key 没加”的中间不一致状态。
+
+### 3. `router/api-router.go`
 
 在 `usageRoute` 块结束后、`redemptionRoute` 块开始前，插入一行路由注册：
 
@@ -93,6 +103,14 @@ apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(
 
 **定位标志**：找到 `tokenUsageRoute.GET("/", controller.GetTokenUsage)` 所在块的结束括号 `}`，在其后插入上述路由。
 
+### 4. `controller/user_token_redeem_test.go`
+
+补充控制器回归测试，重点验证：
+
+- `Bearer sk-xxx` 可直接进入兑换链路
+- 成功后用户钱包增加
+- 成功后当前 token 的 `remain_quota` 同步增加
+
 ### 回归验证
 
 建议最小验证命令：
@@ -100,6 +118,12 @@ apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(
 ```bash
 go test ./controller -run '^TestTokenRedeem' -v
 ```
+
+验证重点：
+
+- `Bearer sk-xxx` 可直接兑换
+- 成功后用户钱包增加
+- 成功后当前 token 额度同步增加
 
 ---
 

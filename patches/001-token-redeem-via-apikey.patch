@@ -1,8 +1,8 @@
 diff --git a/controller/user.go b/controller/user.go
-index b58eab88..ea7a710d 100644
+index 8229d0d2..6172a08a 100644
 --- a/controller/user.go
 +++ b/controller/user.go
-@@ -1031,6 +1031,40 @@ func TopUp(c *gin.Context) {
+@@ -1041,6 +1041,42 @@ func TopUp(c *gin.Context) {
  	})
  }
  
@@ -12,6 +12,8 @@ index b58eab88..ea7a710d 100644
 +// （如 neko-api-key-tool）通过 Bearer sk-xxx 免登录兑换。
 +func TokenRedeem(c *gin.Context) {
 +	userId := c.GetInt("id")
++	tokenId := c.GetInt("token_id")
++	tokenKey := c.GetString("token_key")
 +	lock := getTopUpLock(userId)
 +	if !lock.TryLock() {
 +		common.ApiErrorI18n(c, i18n.MsgUserTopUpProcessing)
@@ -24,7 +26,7 @@ index b58eab88..ea7a710d 100644
 +		common.ApiError(c, err)
 +		return
 +	}
-+	quota, err := model.Redeem(req.Key, userId)
++	quota, err := model.RedeemByToken(req.Key, userId, tokenId, tokenKey)
 +	if err != nil {
 +		if errors.Is(err, model.ErrRedeemFailed) {
 +			common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
@@ -41,28 +43,14 @@ index b58eab88..ea7a710d 100644
 +}
 +
  type UpdateUserSettingRequest struct {
- 	QuotaWarningType           string  `json:"notify_type"`
- 	QuotaWarningThreshold      float64 `json:"quota_warning_threshold"`
-diff --git a/router/api-router.go b/router/api-router.go
-index d4893400..d0a30ffb 100644
---- a/router/api-router.go
-+++ b/router/api-router.go
-@@ -260,6 +260,9 @@ func SetApiRouter(router *gin.Engine) {
- 			}
- 		}
- 
-+		// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
-+		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
-+
- 		redemptionRoute := apiRouter.Group("/redemption")
- 		redemptionRoute.Use(middleware.AdminAuth())
- 		{
+ 	QuotaWarningType                 string  `json:"notify_type"`
+ 	QuotaWarningThreshold            float64 `json:"quota_warning_threshold"`
 diff --git a/controller/user_token_redeem_test.go b/controller/user_token_redeem_test.go
 new file mode 100644
-index 00000000..7067beec
+index 00000000..aa886327
 --- /dev/null
 +++ b/controller/user_token_redeem_test.go
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,207 @@
 +package controller_test
 +
 +import (
@@ -184,6 +172,13 @@ index 00000000..7067beec
 +	return user.Quota
 +}
 +
++func getTokenRemainQuotaForTest(t *testing.T, tokenID int) int {
++	t.Helper()
++	var token model.Token
++	require.NoError(t, model.DB.Select("remain_quota").Where("id = ?", tokenID).First(&token).Error)
++	return token.RemainQuota
++}
++
 +func getRedemptionForTest(t *testing.T, key string) *model.Redemption {
 +	t.Helper()
 +	var redemption model.Redemption
@@ -218,6 +213,7 @@ index 00000000..7067beec
 +	assert.Equal(t, "", resp.Message)
 +	assert.Equal(t, redeemQuota, resp.Data)
 +	assert.Equal(t, initQuota+redeemQuota, getUserQuotaForTest(t, userID))
++	assert.Equal(t, 1000+redeemQuota, getTokenRemainQuotaForTest(t, tokenID))
 +
 +	redemption := getRedemptionForTest(t, redeemKey)
 +	assert.Equal(t, common.RedemptionCodeStatusUsed, redemption.Status)
@@ -262,3 +258,100 @@ index 00000000..7067beec
 +	assert.NotEmpty(t, resp.Message)
 +	assert.Equal(t, initQuota, getUserQuotaForTest(t, userID))
 +}
+diff --git a/model/redemption.go b/model/redemption.go
+index 378976a3..58fb9b19 100644
+--- a/model/redemption.go
++++ b/model/redemption.go
+@@ -7,6 +7,7 @@ import (
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
++	"github.com/bytedance/gopkg/util/gopool"
+ 
+ 	"gorm.io/gorm"
+ )
+@@ -115,7 +116,7 @@ func GetRedemptionById(id int) (*Redemption, error) {
+ 	return &redemption, err
+ }
+ 
+-func Redeem(key string, userId int) (quota int, err error) {
++func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redemption) error) (quota int, err error) {
+ 	if key == "" {
+ 		return 0, errors.New("未提供兑换码")
+ 	}
+@@ -144,6 +145,12 @@ func Redeem(key string, userId int) (quota int, err error) {
+ 		if err != nil {
+ 			return err
+ 		}
++		if apply != nil {
++			err = apply(tx, redemption)
++			if err != nil {
++				return err
++			}
++		}
+ 		redemption.RedeemedTime = common.GetTimestamp()
+ 		redemption.Status = common.RedemptionCodeStatusUsed
+ 		redemption.UsedUserId = userId
+@@ -158,6 +165,48 @@ func Redeem(key string, userId int) (quota int, err error) {
+ 	return redemption.Quota, nil
+ }
+ 
++func Redeem(key string, userId int) (quota int, err error) {
++	return redeem(key, userId, nil)
++}
++
++func RedeemByToken(key string, userId int, tokenId int, tokenKey string) (quota int, err error) {
++	if tokenId == 0 || tokenKey == "" {
++		return 0, errors.New("无效的令牌")
++	}
++	quota, err = redeem(key, userId, func(tx *gorm.DB, redemption *Redemption) error {
++		result := tx.Model(&Token{}).Where("id = ? AND user_id = ?", tokenId, userId).Updates(
++			map[string]interface{}{
++				"remain_quota":  gorm.Expr("remain_quota + ?", redemption.Quota),
++				"used_quota":    gorm.Expr("used_quota - ?", redemption.Quota),
++				"accessed_time": common.GetTimestamp(),
++			},
++		)
++		if result.Error != nil {
++			return result.Error
++		}
++		if result.RowsAffected == 0 {
++			return errors.New("无效的令牌")
++		}
++		return nil
++	})
++	if err != nil {
++		return 0, err
++	}
++	if common.RedisEnabled {
++		gopool.Go(func() {
++			if err := cacheIncrUserQuota(userId, int64(quota)); err != nil {
++				common.SysLog("failed to increase user quota cache after token redeem: " + err.Error())
++			}
++		})
++		gopool.Go(func() {
++			if err := cacheIncrTokenQuota(tokenKey, int64(quota)); err != nil {
++				common.SysLog("failed to increase token quota cache after token redeem: " + err.Error())
++			}
++		})
++	}
++	return quota, nil
++}
++
+ func (redemption *Redemption) Insert() error {
+ 	var err error
+ 	err = DB.Create(redemption).Error
+diff --git a/router/api-router.go b/router/api-router.go
+index bff158a8..17af1d73 100644
+--- a/router/api-router.go
++++ b/router/api-router.go
+@@ -270,6 +270,9 @@ func SetApiRouter(router *gin.Engine) {
+ 			}
+ 		}
+ 
++		// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
++		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
++
+ 		redemptionRoute := apiRouter.Group("/redemption")
+ 		redemptionRoute.Use(middleware.AdminAuth())
+ 		{

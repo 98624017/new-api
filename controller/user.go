@@ -1047,6 +1047,8 @@ func TopUp(c *gin.Context) {
 // （如 neko-api-key-tool）通过 Bearer sk-xxx 免登录兑换。
 func TokenRedeem(c *gin.Context) {
 	userId := c.GetInt("id")
+	tokenId := c.GetInt("token_id")
+	tokenKey := c.GetString("token_key")
 	lock := getTopUpLock(userId)
 	if !lock.TryLock() {
 		common.ApiErrorI18n(c, i18n.MsgUserTopUpProcessing)
@@ -1059,7 +1061,7 @@ func TokenRedeem(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	quota, err := model.Redeem(req.Key, userId)
+	quota, err := model.RedeemByToken(req.Key, userId, tokenId, tokenKey)
 	if err != nil {
 		if errors.Is(err, model.ErrRedeemFailed) {
 			common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
