@@ -270,6 +270,9 @@ func SetApiRouter(router *gin.Engine) {
 			}
 		}
 
+		// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
+		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+
 		redemptionRoute := apiRouter.Group("/redemption")
 		redemptionRoute.Use(middleware.AdminAuth())
 		{

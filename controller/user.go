@@ -1041,6 +1041,40 @@ func TopUp(c *gin.Context) {
 	})
 }
 
+// TokenRedeem 通过 API Key (sk-xxx) 认证的兑换码兑换接口。
+// 与 TopUp 逻辑一致，但认证方式不同：TopUp 需要用户登录 Session，
+// 而 TokenRedeem 使用 TokenAuthReadOnly 中间件，允许外部工具
+// （如 neko-api-key-tool）通过 Bearer sk-xxx 免登录兑换。
+func TokenRedeem(c *gin.Context) {
+	userId := c.GetInt("id")
+	lock := getTopUpLock(userId)
+	if !lock.TryLock() {
+		common.ApiErrorI18n(c, i18n.MsgUserTopUpProcessing)
+		return
+	}
+	defer lock.Unlock()
+	req := topUpRequest{}
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	quota, err := model.Redeem(req.Key, userId)
+	if err != nil {
+		if errors.Is(err, model.ErrRedeemFailed) {
+			common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    quota,
+	})
+}
+
 type UpdateUserSettingRequest struct {
 	QuotaWarningType                 string  `json:"notify_type"`
 	QuotaWarningThreshold            float64 `json:"quota_warning_threshold"`

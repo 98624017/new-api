@@ -182,6 +182,15 @@ func countLogs(t *testing.T) int64 {
 	return count
 }
 
+func setRestoreTokenQuotaOnRefund(t *testing.T, enabled bool) {
+	t.Helper()
+	old := common.TaskRefundRestoreTokenQuota
+	common.TaskRefundRestoreTokenQuota = enabled
+	t.Cleanup(func() {
+		common.TaskRefundRestoreTokenQuota = old
+	})
+}
+
 // ===========================================================================
 // RefundTaskQuota tests
 // ===========================================================================
@@ -189,6 +198,7 @@ func countLogs(t *testing.T) int64 {
 func TestRefundTaskQuota_Wallet(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
+	setRestoreTokenQuotaOnRefund(t, false)
 
 	const userID, tokenID, channelID = 1, 1, 1
 	const initQuota, preConsumed = 10000, 3000
@@ -205,9 +215,9 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	// User quota should increase by preConsumed
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
 
-	// Token remain_quota should increase, used_quota should decrease
-	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
-	assert.Equal(t, -preConsumed, getTokenUsedQuota(t, tokenID))
+	// Default behavior: token quota should not be restored unless explicitly enabled.
+	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, 0, getTokenUsedQuota(t, tokenID))
 
 	// A refund log should be created
 	log := getLastLog(t)
@@ -217,9 +227,32 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	assert.Equal(t, "test-model", log.ModelName)
 }
 
+func TestRefundTaskQuota_Wallet_RestoreTokenEnabled(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+	setRestoreTokenQuotaOnRefund(t, true)
+
+	const userID, tokenID, channelID = 11, 11, 11
+	const initQuota, preConsumed = 10000, 3000
+	const tokenRemain = 5000
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-test-key-enabled", tokenRemain)
+	seedChannel(t, channelID)
+
+	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+
+	RefundTaskQuota(ctx, task, "task failed: upstream error")
+
+	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
+	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, -preConsumed, getTokenUsedQuota(t, tokenID))
+}
+
 func TestRefundTaskQuota_Subscription(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
+	setRestoreTokenQuotaOnRefund(t, true)
 
 	const userID, tokenID, channelID, subID = 2, 2, 2, 1
 	const preConsumed = 2000
@@ -484,6 +517,7 @@ func simulatePollBilling(ctx context.Context, task *model.Task, newStatus model.
 func TestCASGuardedRefund_Win(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
+	setRestoreTokenQuotaOnRefund(t, false)
 
 	const userID, tokenID, channelID = 20, 20, 20
 	const initQuota, preConsumed = 10000, 4000
@@ -506,7 +540,7 @@ func TestCASGuardedRefund_Win(t *testing.T) {
 
 	// Refund should have happened
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
-	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
 
 	log := getLastLog(t)
 	require.NotNil(t, log)

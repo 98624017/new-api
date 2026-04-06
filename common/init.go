@@ -83,6 +83,7 @@ func InitEnv() {
 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
+	TaskRefundRestoreTokenQuota = GetEnvOrDefaultBool("TASK_REFUND_RESTORE_TOKEN_QUOTA", false)
 	if TLSInsecureSkipVerify {
 		if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {
 			if tr.TLSClientConfig != nil {
@@ -91,6 +92,11 @@ func InitEnv() {
 				tr.TLSClientConfig = InsecureTLSConfig
 			}
 		}
+	}
+	if TaskRefundRestoreTokenQuota {
+		SysLog("TASK_REFUND_RESTORE_TOKEN_QUOTA enabled: failed async task refunds will also restore token quota")
+	} else {
+		SysLog("TASK_REFUND_RESTORE_TOKEN_QUOTA disabled: failed async task refunds will not restore token quota")
 	}
 
 	// Parse requestInterval and set RequestInterval

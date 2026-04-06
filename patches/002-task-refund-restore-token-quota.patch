@@ -1,0 +1,161 @@
+diff --git a/common/constants.go b/common/constants.go
+index 6823b2c8..3ad4aaed 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -75,6 +75,7 @@ var MemoryCacheEnabled bool
+ var LogConsumeEnabled = true
+ 
+ var TLSInsecureSkipVerify bool
++var TaskRefundRestoreTokenQuota bool
+ var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
+ 
+ var SMTPServer = ""
+diff --git a/common/init.go b/common/init.go
+index e4ddbb45..eb0b99bf 100644
+--- a/common/init.go
++++ b/common/init.go
+@@ -83,14 +83,20 @@ func InitEnv() {
+ 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
+ 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
+ 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
++	TaskRefundRestoreTokenQuota = GetEnvOrDefaultBool("TASK_REFUND_RESTORE_TOKEN_QUOTA", false)
+ 	if TLSInsecureSkipVerify {
+ 		if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {
+ 			if tr.TLSClientConfig != nil {
+ 				tr.TLSClientConfig.InsecureSkipVerify = true
+ 			} else {
+ 				tr.TLSClientConfig = InsecureTLSConfig
+ 			}
+ 		}
+ 	}
++	if TaskRefundRestoreTokenQuota {
++		SysLog("TASK_REFUND_RESTORE_TOKEN_QUOTA enabled: failed async task refunds will also restore token quota")
++	} else {
++		SysLog("TASK_REFUND_RESTORE_TOKEN_QUOTA disabled: failed async task refunds will not restore token quota")
++	}
+ 
+ 	// Parse requestInterval and set RequestInterval
+diff --git a/service/task_billing.go b/service/task_billing.go
+index 0da4cf43..c89b5003 100644
+--- a/service/task_billing.go
++++ b/service/task_billing.go
+@@ -141,7 +141,8 @@ func taskModelName(task *model.Task) string {
+ }
+ 
+ // RefundTaskQuota 统一的任务失败退款逻辑。
+-// 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
++// 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅）。
++// 若启用 TASK_REFUND_RESTORE_TOKEN_QUOTA，则同时恢复令牌额度。
+ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+ 	quota := task.Quota
+ 	if quota == 0 {
+@@ -154,13 +155,16 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+ 		return
+ 	}
+ 
+-	// 2. 退还令牌额度
+-	taskAdjustTokenQuota(ctx, task, -quota)
++	// 2. 按开关决定是否退还令牌额度
++	if common.TaskRefundRestoreTokenQuota {
++		taskAdjustTokenQuota(ctx, task, -quota)
++	}
+ 
+ 	// 3. 记录日志
+ 	other := taskBillingOther(task)
+ 	other["task_id"] = task.TaskID
+ 	other["reason"] = reason
++	other["restore_token_quota"] = common.TaskRefundRestoreTokenQuota
+ 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
+ 		UserId:    task.UserId,
+ 		LogType:   model.LogTypeRefund,
+diff --git a/service/task_billing_test.go b/service/task_billing_test.go
+index 1145bba5..fda29322 100644
+--- a/service/task_billing_test.go
++++ b/service/task_billing_test.go
+@@ -182,6 +182,15 @@ func countLogs(t *testing.T) int64 {
+ 	return count
+ }
+ 
++func setRestoreTokenQuotaOnRefund(t *testing.T, enabled bool) {
++	t.Helper()
++	old := common.TaskRefundRestoreTokenQuota
++	common.TaskRefundRestoreTokenQuota = enabled
++	t.Cleanup(func() {
++		common.TaskRefundRestoreTokenQuota = old
++	})
++}
++
+ // ===========================================================================
+ // RefundTaskQuota tests
+ // ===========================================================================
+@@ -189,6 +198,7 @@ func countLogs(t *testing.T) int64 {
+ func TestRefundTaskQuota_Wallet(t *testing.T) {
+ 	truncate(t)
+ 	ctx := context.Background()
++	setRestoreTokenQuotaOnRefund(t, false)
+ 
+ 	const userID, tokenID, channelID = 1, 1, 1
+ 	const initQuota, preConsumed = 10000, 3000
+@@ -205,9 +215,9 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
+ 	// User quota should increase by preConsumed
+ 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
+ 
+-	// Token remain_quota should increase, used_quota should decrease
+-	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
+-	assert.Equal(t, -preConsumed, getTokenUsedQuota(t, tokenID))
++	// Default behavior: token quota should not be restored unless explicitly enabled.
++	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
++	assert.Equal(t, 0, getTokenUsedQuota(t, tokenID))
+ 
+ 	// A refund log should be created
+ 	log := getLastLog(t)
+@@ -217,9 +227,32 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
+ 	assert.Equal(t, "test-model", log.ModelName)
+ }
+ 
++func TestRefundTaskQuota_Wallet_RestoreTokenEnabled(t *testing.T) {
++	truncate(t)
++	ctx := context.Background()
++	setRestoreTokenQuotaOnRefund(t, true)
++
++	const userID, tokenID, channelID = 11, 11, 11
++	const initQuota, preConsumed = 10000, 3000
++	const tokenRemain = 5000
++
++	seedUser(t, userID, initQuota)
++	seedToken(t, tokenID, userID, "sk-test-key-enabled", tokenRemain)
++	seedChannel(t, channelID)
++
++	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
++
++	RefundTaskQuota(ctx, task, "task failed: upstream error")
++
++	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
++	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
++	assert.Equal(t, -preConsumed, getTokenUsedQuota(t, tokenID))
++}
++
+ func TestRefundTaskQuota_Subscription(t *testing.T) {
+ 	truncate(t)
+ 	ctx := context.Background()
++	setRestoreTokenQuotaOnRefund(t, true)
+ 
+ 	const userID, tokenID, channelID, subID = 2, 2, 2, 1
+ 	const preConsumed = 2000
+@@ -484,6 +517,7 @@ func simulatePollBilling(ctx context.Context, task *model.Task, newStatus model.
+ func TestCASGuardedRefund_Win(t *testing.T) {
+ 	truncate(t)
+ 	ctx := context.Background()
++	setRestoreTokenQuotaOnRefund(t, false)
+ 
+ 	const userID, tokenID, channelID = 20, 20, 20
+ 	const initQuota, preConsumed = 10000, 4000
+@@ -506,7 +540,7 @@ func TestCASGuardedRefund_Win(t *testing.T) {
+ 
+ 	// Refund should have happened
+ 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
+-	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
++	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+ 
+ 	log := getLastLog(t)
+ 	require.NotNil(t, log)

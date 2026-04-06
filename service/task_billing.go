@@ -148,7 +148,8 @@ func taskModelName(task *model.Task) string {
 }
 
 // RefundTaskQuota 统一的任务失败退款逻辑。
-// 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
+// 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅）。
+// 若启用 TASK_REFUND_RESTORE_TOKEN_QUOTA，则同时恢复令牌额度。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 	quota := task.Quota
 	if quota == 0 {
@@ -161,13 +162,16 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 		return
 	}
 
-	// 2. 退还令牌额度
-	taskAdjustTokenQuota(ctx, task, -quota)
+	// 2. 按开关决定是否退还令牌额度
+	if common.TaskRefundRestoreTokenQuota {
+		taskAdjustTokenQuota(ctx, task, -quota)
+	}
 
 	// 3. 记录日志
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
 	other["reason"] = reason
+	other["restore_token_quota"] = common.TaskRefundRestoreTokenQuota
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
 		UserId:    task.UserId,
 		LogType:   model.LogTypeRefund,

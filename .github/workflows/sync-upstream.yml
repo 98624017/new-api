@@ -1,0 +1,221 @@
+name: Sync upstream & apply custom patches
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: '上游仓库地址'
+        required: true
+        default: 'https://github.com/QuantumNous/new-api.git'
+      upstream_branch:
+        description: '上游分支'
+        required: true
+        default: 'main'
+      dry_run:
+        description: '仅测试补丁是否可应用（不推送）'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-and-patch:
+    name: Sync upstream & apply patches
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "${{ inputs.upstream_repo }}" || true
+          git fetch upstream "${{ inputs.upstream_branch }}"
+
+      - name: Show upstream diff summary
+        run: |
+          echo "### Upstream commits since last sync:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git log --oneline HEAD..upstream/${{ inputs.upstream_branch }} | head -30 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          COMMIT_COUNT=$(git rev-list --count HEAD..upstream/${{ inputs.upstream_branch }})
+          echo "Total new commits: $COMMIT_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "::notice::Upstream has $COMMIT_COUNT new commits"
+
+      - name: Create sync branch
+        run: |
+          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          echo "SYNC_BRANCH=$BRANCH" >> $GITHUB_ENV
+          git checkout -b "$BRANCH"
+
+      - name: Merge upstream
+        run: |
+          git merge upstream/${{ inputs.upstream_branch }} --no-edit --allow-unrelated-histories || {
+            echo "::error::Merge conflict with upstream. Manual resolution required."
+            git diff --name-only --diff-filter=U
+            exit 1
+          }
+
+      - name: Collect patch files
+        id: patches
+        run: |
+          if [ ! -d patches ] || [ -z "$(ls patches/*.patch 2>/dev/null)" ]; then
+            echo "::notice::No patch files found in patches/"
+            echo "has_patches=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_patches=true" >> $GITHUB_OUTPUT
+            echo "### Patches to apply:" >> $GITHUB_STEP_SUMMARY
+            for f in patches/*.patch; do
+              echo "- \`$(basename $f)\`" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Apply patches
+        if: steps.patches.outputs.has_patches == 'true'
+        run: |
+          FAILED=0
+          APPLIED=0
+          RESULTS=""
+
+          for patch in patches/*.patch; do
+            NAME=$(basename "$patch")
+            echo "--- Applying: $NAME ---"
+
+            # 先尝试直接 apply
+            if git apply --check "$patch" 2>/dev/null; then
+              git apply "$patch"
+              echo "::notice::$NAME applied cleanly"
+              RESULTS="${RESULTS}\n| \`${NAME}\` | ✅ Applied |"
+              APPLIED=$((APPLIED + 1))
+
+            # 再尝试忽略空白差异
+            elif git apply --check --ignore-whitespace "$patch" 2>/dev/null; then
+              git apply --ignore-whitespace "$patch"
+              echo "::warning::$NAME applied with whitespace adjustments"
+              RESULTS="${RESULTS}\n| \`${NAME}\` | ⚠️ Applied (whitespace adjusted) |"
+              APPLIED=$((APPLIED + 1))
+
+            # 最后尝试 3way merge
+            elif git apply --check --3way "$patch" 2>/dev/null; then
+              git apply --3way "$patch"
+              echo "::warning::$NAME applied via 3-way merge"
+              RESULTS="${RESULTS}\n| \`${NAME}\` | ⚠️ Applied (3-way merge) |"
+              APPLIED=$((APPLIED + 1))
+
+            else
+              echo "::error::$NAME FAILED to apply"
+              RESULTS="${RESULTS}\n| \`${NAME}\` | ❌ **FAILED** |"
+              FAILED=$((FAILED + 1))
+              # 输出冲突详情到 summary
+              echo "#### $NAME failure details:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              git apply --stat "$patch" 2>&1 >> $GITHUB_STEP_SUMMARY || true
+              git apply --3way "$patch" 2>&1 >> $GITHUB_STEP_SUMMARY || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              git checkout -- . 2>/dev/null || true
+            fi
+          done
+
+          # 写入 summary
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Patch results ($APPLIED applied, $FAILED failed)" >> $GITHUB_STEP_SUMMARY
+          echo "| Patch | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo -e "$RESULTS" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::$FAILED patch(es) failed. Check summary for details."
+            exit 1
+          fi
+
+      - name: Commit patched changes
+        if: steps.patches.outputs.has_patches == 'true'
+        run: |
+          git add -A
+          # 如果有改动才提交
+          if ! git diff --cached --quiet; then
+            git commit -m "$(cat <<'EOF'
+          feat: re-apply custom patches after upstream sync
+
+          Patches applied:
+          $(ls patches/*.patch | xargs -I{} basename {})
+          EOF
+          )"
+          else
+            echo "::notice::No changes after applying patches"
+          fi
+
+      - name: Set up Go
+        if: inputs.dry_run == false
+        uses: actions/setup-go@v3
+        with:
+          go-version: '>=1.25.1'
+
+      - name: Verify customizations
+        if: inputs.dry_run == false
+        run: |
+          go mod download
+          echo "### Customization verification" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "go test ./controller -run '^TestTokenRedeem' -v" >> $GITHUB_STEP_SUMMARY
+          echo "go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          go test ./controller -run '^TestTokenRedeem' -v
+          go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
+          echo "### ✅ Customization verification passed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify build
+        if: inputs.dry_run == false
+        run: |
+          go build ./...
+          echo "### ✅ Build verification passed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Push branch & create PR
+        if: inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push -u origin "$SYNC_BRANCH"
+
+          PR_BODY=$(cat <<'PREOF'
+          ## Upstream Sync
+
+          Synced from `${{ inputs.upstream_repo }}` branch `${{ inputs.upstream_branch }}`.
+
+          ### Custom patches re-applied
+          $(ls patches/*.patch 2>/dev/null | xargs -I{} echo "- \`{}\`" || echo "- (none)")
+
+          ### Verification
+          - [x] Upstream merge: clean
+          - [x] Patches applied: all passed
+          - [x] Customization verification: passed
+          - [x] Go build: passed
+
+          > Auto-generated by `sync-upstream.yml` workflow.
+          PREOF
+          )
+
+          gh pr create \
+            --title "sync: upstream $(date +%Y-%m-%d)" \
+            --body "$PR_BODY" \
+            --base main \
+            --head "$SYNC_BRANCH"
+
+      - name: Dry run summary
+        if: inputs.dry_run == true
+        run: |
+          echo "### 🧪 Dry run completed" >> $GITHUB_STEP_SUMMARY
+          echo "All patches applied successfully. No changes pushed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To actually sync, re-run this workflow with **dry_run = false**." >> $GITHUB_STEP_SUMMARY
