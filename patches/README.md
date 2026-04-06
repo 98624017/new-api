@@ -167,17 +167,30 @@ if common.TaskRefundRestoreTokenQuota {
 
 - 开关关闭：失败后只退资金来源
 - 开关开启：失败后退资金来源并恢复 token 额度
+- `UpdateVideoTasks` 失败路径：命中真实视频轮询服务层后，失败任务触发退款
 
 ### 5. `scripts/seed_task_refund_fixture.go`
 
-离线生成 `002` 容器验收所需的 SQLite fixture：
+离线生成 `002` 容器验收所需的 fixture：
 
 - 建立最小表结构
-- 写入测试用户、测试 token、测试渠道
-- 写入一条已预扣、待超时失败的异步任务
+- 写入测试用户、测试 token、测试视频渠道
+- 写入一条已预扣、待视频轮询失败的异步任务
+- 任务字段显式带上：
+  - 视频渠道类型
+  - 真实 `task.platform`
+  - 真实 `private_data.upstream_task_id`
 - 提供 `inspect` 模式回读任务 / 钱包 / token 结果
 
-### 6. `scripts/verify_task_refund_restore_token_quota.sh`
+### 6. `scripts/mock_video_failure_server.go`
+
+宿主机上的本地 mock 上游服务：
+
+- 提供 `GET /v1/videos/{task_id}` 失败响应
+- 提供 `/healthz` 供脚本等待启动完成
+- 提供 `/stats` 供脚本确认容器确实命中过视频轮询接口
+
+### 7. `scripts/verify_task_refund_restore_token_quota.sh`
 
 更接近业务路径的黑盒验收脚本，覆盖两轮场景：
 
@@ -186,6 +199,8 @@ if common.TaskRefundRestoreTokenQuota {
 
 脚本验证点：
 
+- 关闭 `TASK_TIMEOUT_MINUTES`，避免落到 timeout sweep 兜底路径
+- 通过 mock `/stats` 确认命中过真实视频轮询路径
 - 用户登录后 `GET /api/user/self` 中的钱包额度变化
 - `GET /api/usage/token/` 中的 key 剩余额度变化
 - 最终任务状态为 `FAILURE`

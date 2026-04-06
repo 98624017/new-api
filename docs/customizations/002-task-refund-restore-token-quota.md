@@ -97,7 +97,7 @@ TASK_REFUND_RESTORE_TOKEN_QUOTA=false
 建议最小验证命令：
 
 ```bash
-go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
+go test ./service -run '^(TestUpdateVideoTasks_FailureRefund|TestRefundTaskQuota|TestCASGuarded)' -v
 ```
 
 建议补充业务黑盒验收：
@@ -108,17 +108,24 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 该脚本会：
 
-- 先用 `scripts/seed_task_refund_fixture.go` 离线生成 SQLite fixture
-- 再分别以 `TASK_REFUND_RESTORE_TOKEN_QUOTA=false` 和 `true` 启动容器
+- 先启动 `scripts/mock_video_failure_server.go`，在宿主机模拟一个失败的 `videos` 上游查询接口
+- 再用 `scripts/seed_task_refund_fixture.go` 离线生成 fixture，写入真实视频任务字段：
+  - `channel.type = Sora`
+  - `task.platform = "55"`
+  - `private_data.upstream_task_id = upstream-video-failure-001`
+- 最后分别以 `TASK_REFUND_RESTORE_TOKEN_QUOTA=false` 和 `true` 启动容器
+- 黑盒会关闭 `TASK_TIMEOUT_MINUTES`，避免超时兜底路径干扰验收
 - 通过用户登录后的 `GET /api/user/self` 验证钱包退款结果
 - 通过 `GET /api/usage/token/` 验证 key/token 剩余额度是否恢复
+- 通过 mock `/stats` 验证容器确实命中过上游视频轮询接口
 - 最后回读数据库，确认任务状态已经落为 `FAILURE`
 
 当前黑盒验收基线：
 
 - 初始：`USER_QUOTA=800`，`TOKEN_REMAIN=300`
-- 开关关闭：`USER_QUOTA=1000`，`TOKEN_REMAIN=300`
-- 开关开启：`USER_QUOTA=1000`，`TOKEN_REMAIN=500`
+- 开关关闭：`USER_QUOTA=1000`，`TOKEN_REMAIN=300`，`TASK_FAIL_REASON=mock upstream failure`
+- 开关开启：`USER_QUOTA=1000`，`TOKEN_REMAIN=500`，`TASK_FAIL_REASON=mock upstream failure`
+- 两轮都要求 `task_hits_after >= 1`，否则视为没有走到真实视频轮询路径
 
 ## 9. 升级关注点
 
@@ -135,7 +142,9 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 - 已新增环境变量 `TASK_REFUND_RESTORE_TOKEN_QUOTA`
 - 已将失败退款中的 token 恢复逻辑改为按开关执行
 - 已补充 `RefundTaskQuota` 相关测试
+- 已补充 `UpdateVideoTasks` 失败退款回归测试
 - 已补充更接近业务路径的容器黑盒验收脚本：
   - `scripts/seed_task_refund_fixture.go`
+  - `scripts/mock_video_failure_server.go`
   - `scripts/verify_task_refund_restore_token_quota.sh`
 - 已生成 `patches/002-task-refund-restore-token-quota.patch`

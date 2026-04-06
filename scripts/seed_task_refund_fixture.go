@@ -4,31 +4,37 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
 const (
-	fixtureUsername    = "patchuser"
-	fixturePassword    = "Password123"
-	fixtureTokenKey    = "refundtasktoken"
-	fixtureTaskID      = "task_refund_acceptance"
-	fixtureChannelID   = 1
-	fixtureUserID      = 1
-	fixtureTokenID     = 1
-	fixtureTaskQuota   = 200
-	fixtureUserQuota   = 800
-	fixtureTokenRemain = 300
-	fixtureTokenUsed   = 200
+	fixtureUsername       = "patchuser"
+	fixturePassword       = "Password123"
+	fixtureTokenKey       = "refundtasktoken"
+	fixtureTaskID         = "task_video_refund_acceptance"
+	fixtureUpstreamTaskID = "upstream-video-failure-001"
+	fixtureChannelID      = 1
+	fixtureUserID         = 1
+	fixtureTokenID        = 1
+	fixtureTaskQuota      = 200
+	fixtureUserQuota      = 800
+	fixtureTokenRemain    = 300
+	fixtureTokenUsed      = 200
+	fixtureChannelType    = constant.ChannelTypeSora
+	fixtureOriginModel    = "sora-2"
 )
 
 func main() {
 	mode := flag.String("mode", "seed", "seed or inspect")
 	dbPath := flag.String("db", "", "sqlite database path")
+	baseURL := flag.String("base-url", "", "video task mock server base url")
 	flag.Parse()
 
 	if *dbPath == "" {
@@ -49,13 +55,19 @@ func main() {
 
 	switch *mode {
 	case "seed":
-		if err := seedFixture(db); err != nil {
+		if *baseURL == "" {
+			fmt.Fprintln(os.Stderr, "missing -base-url")
+			os.Exit(1)
+		}
+		if err := seedFixture(db, *baseURL); err != nil {
 			fmt.Fprintf(os.Stderr, "seed fixture failed: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("SEEDED_USER=%s\n", fixtureUsername)
 		fmt.Printf("SEEDED_PASSWORD=%s\n", fixturePassword)
 		fmt.Printf("SEEDED_TOKEN_KEY=sk-%s\n", fixtureTokenKey)
+		fmt.Printf("SEEDED_TASK_ID=%s\n", fixtureTaskID)
+		fmt.Printf("SEEDED_UPSTREAM_TASK_ID=%s\n", fixtureUpstreamTaskID)
 	case "inspect":
 		if err := inspectFixture(db); err != nil {
 			fmt.Fprintf(os.Stderr, "inspect fixture failed: %v\n", err)
@@ -80,7 +92,7 @@ func ensureSchema(db *gorm.DB) error {
 	)
 }
 
-func seedFixture(db *gorm.DB) error {
+func seedFixture(db *gorm.DB, baseURL string) error {
 	common.UsingSQLite = true
 
 	if err := db.Exec("DELETE FROM tasks").Error; err != nil {
@@ -133,11 +145,13 @@ func seedFixture(db *gorm.DB) error {
 	}
 
 	channel := &model.Channel{
-		Id:     fixtureChannelID,
-		Name:   "acceptance-channel",
-		Key:    "dummy-key",
-		Status: common.ChannelStatusEnabled,
-		Group:  "default",
+		Id:      fixtureChannelID,
+		Type:    fixtureChannelType,
+		Name:    "acceptance-video-channel",
+		Key:     "dummy-video-key",
+		Status:  common.ChannelStatusEnabled,
+		Group:   "default",
+		BaseURL: &baseURL,
 	}
 	if err := db.Create(channel).Error; err != nil {
 		return err
@@ -159,26 +173,28 @@ func seedFixture(db *gorm.DB) error {
 
 	task := &model.Task{
 		TaskID:     fixtureTaskID,
-		CreatedAt:  now - 120,
-		UpdatedAt:  now - 120,
+		Platform:   constant.TaskPlatform(strconv.Itoa(fixtureChannelType)),
+		CreatedAt:  now,
+		UpdatedAt:  now,
 		UserId:     fixtureUserID,
 		Group:      "default",
 		ChannelId:  fixtureChannelID,
 		Quota:      fixtureTaskQuota,
-		Action:     "generate",
+		Action:     constant.TaskActionGenerate,
 		Status:     model.TaskStatusInProgress,
-		SubmitTime: now - 120,
+		SubmitTime: now,
 		Progress:   "30%",
 		Properties: model.Properties{
-			OriginModelName: "test-model",
+			OriginModelName: fixtureOriginModel,
 		},
 		PrivateData: model.TaskPrivateData{
-			BillingSource: "wallet",
-			TokenId:       fixtureTokenID,
+			UpstreamTaskID: fixtureUpstreamTaskID,
+			BillingSource:  "wallet",
+			TokenId:        fixtureTokenID,
 			BillingContext: &model.TaskBillingContext{
 				ModelPrice:      0.02,
 				GroupRatio:      1.0,
-				OriginModelName: "test-model",
+				OriginModelName: fixtureOriginModel,
 			},
 		},
 	}

@@ -3,12 +3,17 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/glebarez/sqlite"
@@ -103,6 +108,20 @@ func seedSubscription(t *testing.T, id int, userId int, amountTotal int64, amoun
 func seedChannel(t *testing.T, id int) {
 	t.Helper()
 	ch := &model.Channel{Id: id, Name: "test_channel", Key: "sk-test", Status: common.ChannelStatusEnabled}
+	require.NoError(t, model.DB.Create(ch).Error)
+}
+
+func seedVideoChannel(t *testing.T, id int, channelType int, baseURL string) {
+	t.Helper()
+	ch := &model.Channel{
+		Id:      id,
+		Name:    "test_video_channel",
+		Type:    channelType,
+		Key:     "sk-video-test",
+		Status:  common.ChannelStatusEnabled,
+		Group:   "default",
+		BaseURL: &baseURL,
+	}
 	require.NoError(t, model.DB.Create(ch).Error)
 }
 
@@ -641,6 +660,74 @@ func TestNonTerminalUpdate_NoBilling(t *testing.T) {
 	assert.Equal(t, "50%", reloaded.Progress)
 }
 
+func TestUpdateVideoTasks_FailureRefund(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID = 24, 24, 24
+	const initQuota, preConsumed = 10000, 4000
+	const tokenRemain = 6000
+	const upstreamTaskID = "upstream-video-failure-001"
+	const publicTaskID = "task_video_refund_acceptance"
+
+	var hitCount atomic.Int32
+	oldFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(platform constant.TaskPlatform) TaskPollingAdaptor {
+		return &mockVideoFailureAdaptor{
+			hitCount: &hitCount,
+		}
+	}
+	defer func() {
+		GetTaskAdaptorFunc = oldFactory
+	}()
+
+	for _, tc := range []struct {
+		name                string
+		restoreTokenQuota   bool
+		expectedRemainQuota int
+	}{
+		{name: "restore disabled", restoreTokenQuota: false, expectedRemainQuota: tokenRemain},
+		{name: "restore enabled", restoreTokenQuota: true, expectedRemainQuota: tokenRemain + preConsumed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			setRestoreTokenQuotaOnRefund(t, tc.restoreTokenQuota)
+			hitCount.Store(0)
+
+			seedUser(t, userID, initQuota)
+			seedToken(t, tokenID, userID, "sk-video-refund", tokenRemain)
+			seedVideoChannel(t, channelID, constant.ChannelTypeSora, "http://mock-video.test")
+
+			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+			task.TaskID = publicTaskID
+			task.Platform = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeSora))
+			task.Action = constant.TaskActionGenerate
+			task.Status = model.TaskStatusInProgress
+			task.Progress = "30%"
+			task.SubmitTime = time.Now().Unix()
+			task.PrivateData.UpstreamTaskID = upstreamTaskID
+			require.NoError(t, model.DB.Create(task).Error)
+
+			taskM := map[string]*model.Task{
+				task.GetUpstreamTaskID(): task,
+			}
+			taskChannelM := map[int][]string{
+				channelID: []string{task.GetUpstreamTaskID()},
+			}
+
+			require.NoError(t, UpdateVideoTasks(ctx, task.Platform, taskChannelM, taskM))
+
+			var reloaded model.Task
+			require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+			assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+			assert.Equal(t, "mock upstream failure", reloaded.FailReason)
+			assert.Equal(t, int32(1), hitCount.Load())
+			assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
+			assert.Equal(t, tc.expectedRemainQuota, getTokenRemainQuota(t, tokenID))
+		})
+	}
+}
+
 // ===========================================================================
 // Mock adaptor for settleTaskBillingOnComplete tests
 // ===========================================================================
@@ -656,6 +743,33 @@ func (m *mockAdaptor) FetchTask(string, string, map[string]any, string) (*http.R
 func (m *mockAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) { return nil, nil }
 func (m *mockAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
 	return m.adjustReturn
+}
+
+type mockVideoFailureAdaptor struct {
+	hitCount *atomic.Int32
+}
+
+func (m *mockVideoFailureAdaptor) Init(_ *relaycommon.RelayInfo) {}
+func (m *mockVideoFailureAdaptor) FetchTask(string, string, map[string]any, string) (*http.Response, error) {
+	if m.hitCount != nil {
+		m.hitCount.Add(1)
+	}
+	body := `{"id":"upstream-video-failure-001","object":"video","status":"failed","progress":100,"error":{"message":"mock upstream failure","code":"mock_failure"}}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+func (m *mockVideoFailureAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) {
+	return &relaycommon.TaskInfo{
+		Status:   model.TaskStatusFailure,
+		Reason:   "mock upstream failure",
+		Progress: "100%",
+	}, nil
+}
+func (m *mockVideoFailureAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
+	return 0
 }
 
 // ===========================================================================
