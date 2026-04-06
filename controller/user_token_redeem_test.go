@@ -64,7 +64,7 @@ func seedRedeemUser(t *testing.T, id int, quota int) {
 	require.NoError(t, model.DB.Create(user).Error)
 }
 
-func seedRedeemToken(t *testing.T, id int, userID int, key string) {
+func seedRedeemToken(t *testing.T, id int, userID int, key string, remainQuota int, usedQuota int) {
 	t.Helper()
 	token := &model.Token{
 		Id:          id,
@@ -72,7 +72,8 @@ func seedRedeemToken(t *testing.T, id int, userID int, key string) {
 		Key:         key,
 		Name:        "redeem_token",
 		Status:      common.TokenStatusEnabled,
-		RemainQuota: 1000,
+		RemainQuota: remainQuota,
+		UsedQuota:   usedQuota,
 		ExpiredTime: -1,
 	}
 	require.NoError(t, model.DB.Create(token).Error)
@@ -126,6 +127,13 @@ func getTokenRemainQuotaForTest(t *testing.T, tokenID int) int {
 	return token.RemainQuota
 }
 
+func getTokenUsedQuotaForTest(t *testing.T, tokenID int) int {
+	t.Helper()
+	var token model.Token
+	require.NoError(t, model.DB.Select("used_quota").Where("id = ?", tokenID).First(&token).Error)
+	return token.UsedQuota
+}
+
 func getRedemptionForTest(t *testing.T, key string) *model.Redemption {
 	t.Helper()
 	var redemption model.Redemption
@@ -140,11 +148,13 @@ func TestTokenRedeem_Success(t *testing.T) {
 	const tokenID = 1
 	const initQuota = 100
 	const redeemQuota = 250
+	const initTokenRemain = 1000
+	const initTokenUsed = 400
 	const tokenKey = "tokenredeem1"
 	const redeemKey = "redeem-code-001"
 
 	seedRedeemUser(t, userID, initQuota)
-	seedRedeemToken(t, tokenID, userID, tokenKey)
+	seedRedeemToken(t, tokenID, userID, tokenKey, initTokenRemain, initTokenUsed)
 	seedRedemptionCode(t, 1, redeemKey, redeemQuota)
 
 	w := performTokenRedeemRequest(t, makeTokenRedeemRouter(), "Bearer sk-"+tokenKey, redeemKey)
@@ -160,7 +170,9 @@ func TestTokenRedeem_Success(t *testing.T) {
 	assert.Equal(t, "", resp.Message)
 	assert.Equal(t, redeemQuota, resp.Data)
 	assert.Equal(t, initQuota+redeemQuota, getUserQuotaForTest(t, userID))
-	assert.Equal(t, 1000+redeemQuota, getTokenRemainQuotaForTest(t, tokenID))
+	assert.Equal(t, initTokenRemain+redeemQuota, getTokenRemainQuotaForTest(t, tokenID))
+	assert.Equal(t, initTokenUsed, getTokenUsedQuotaForTest(t, tokenID))
+	assert.Equal(t, initTokenRemain+initTokenUsed+redeemQuota, getTokenRemainQuotaForTest(t, tokenID)+getTokenUsedQuotaForTest(t, tokenID))
 
 	redemption := getRedemptionForTest(t, redeemKey)
 	assert.Equal(t, common.RedemptionCodeStatusUsed, redemption.Status)
@@ -191,7 +203,7 @@ func TestTokenRedeem_InvalidRedemption(t *testing.T) {
 	const tokenKey = "tokenredeem2"
 
 	seedRedeemUser(t, userID, initQuota)
-	seedRedeemToken(t, tokenID, userID, tokenKey)
+	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
 
 	w := performTokenRedeemRequest(t, makeTokenRedeemRouter(), "Bearer sk-"+tokenKey, "missing-redemption")
 

@@ -177,7 +177,6 @@ func RedeemByToken(key string, userId int, tokenId int, tokenKey string) (quota 
 		result := tx.Model(&Token{}).Where("id = ? AND user_id = ?", tokenId, userId).Updates(
 			map[string]interface{}{
 				"remain_quota":  gorm.Expr("remain_quota + ?", redemption.Quota),
-				"used_quota":    gorm.Expr("used_quota - ?", redemption.Quota),
 				"accessed_time": common.GetTimestamp(),
 			},
 		)
