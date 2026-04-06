@@ -100,6 +100,26 @@ TASK_REFUND_RESTORE_TOKEN_QUOTA=false
 go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 ```
 
+建议补充业务黑盒验收：
+
+```bash
+bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
+```
+
+该脚本会：
+
+- 先用 `scripts/seed_task_refund_fixture.go` 离线生成 SQLite fixture
+- 再分别以 `TASK_REFUND_RESTORE_TOKEN_QUOTA=false` 和 `true` 启动容器
+- 通过用户登录后的 `GET /api/user/self` 验证钱包退款结果
+- 通过 `GET /api/usage/token/` 验证 key/token 剩余额度是否恢复
+- 最后回读数据库，确认任务状态已经落为 `FAILURE`
+
+当前黑盒验收基线：
+
+- 初始：`USER_QUOTA=800`，`TOKEN_REMAIN=300`
+- 开关关闭：`USER_QUOTA=1000`，`TOKEN_REMAIN=300`
+- 开关开启：`USER_QUOTA=1000`，`TOKEN_REMAIN=500`
+
 ## 9. 升级关注点
 
 上游同步时重点关注：
@@ -115,4 +135,7 @@ go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 - 已新增环境变量 `TASK_REFUND_RESTORE_TOKEN_QUOTA`
 - 已将失败退款中的 token 恢复逻辑改为按开关执行
 - 已补充 `RefundTaskQuota` 相关测试
+- 已补充更接近业务路径的容器黑盒验收脚本：
+  - `scripts/seed_task_refund_fixture.go`
+  - `scripts/verify_task_refund_restore_token_quota.sh`
 - 已生成 `patches/002-task-refund-restore-token-quota.patch`

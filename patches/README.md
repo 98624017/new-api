@@ -168,6 +168,34 @@ if common.TaskRefundRestoreTokenQuota {
 - 开关关闭：失败后只退资金来源
 - 开关开启：失败后退资金来源并恢复 token 额度
 
+### 5. `scripts/seed_task_refund_fixture.go`
+
+离线生成 `002` 容器验收所需的 SQLite fixture：
+
+- 建立最小表结构
+- 写入测试用户、测试 token、测试渠道
+- 写入一条已预扣、待超时失败的异步任务
+- 提供 `inspect` 模式回读任务 / 钱包 / token 结果
+
+### 6. `scripts/verify_task_refund_restore_token_quota.sh`
+
+更接近业务路径的黑盒验收脚本，覆盖两轮场景：
+
+- `TASK_REFUND_RESTORE_TOKEN_QUOTA=false`
+- `TASK_REFUND_RESTORE_TOKEN_QUOTA=true`
+
+脚本验证点：
+
+- 用户登录后 `GET /api/user/self` 中的钱包额度变化
+- `GET /api/usage/token/` 中的 key 剩余额度变化
+- 最终任务状态为 `FAILURE`
+
+建议验收命令：
+
+```bash
+bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
+```
+
 ---
 
 ## 补丁维护规范
