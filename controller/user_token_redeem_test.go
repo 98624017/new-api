@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
@@ -35,6 +36,9 @@ func TestMain(m *testing.M) {
 	}
 	if err := model.InitLogDB(); err != nil {
 		panic("failed to init test log db: " + err.Error())
+	}
+	if err := i18n.Init(); err != nil {
+		panic("failed to init i18n: " + err.Error())
 	}
 
 	code := m.Run()
@@ -104,6 +108,7 @@ func performTokenRedeemRequest(t *testing.T, router *gin.Engine, auth string, re
 
 	req := httptest.NewRequest(http.MethodPost, "/api/token/redeem", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Language", "zh-CN")
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
