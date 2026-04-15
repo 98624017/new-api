@@ -1,7 +1,7 @@
 FRONTEND_DIR = ./web
 BACKEND_DIR = .
 
-.PHONY: all build-frontend start-backend
+.PHONY: all build-frontend start-backend sync-upstream-local
 
 all: build-frontend start-backend
 
@@ -12,3 +12,6 @@ build-frontend:
 start-backend:
 	@echo "Starting backend dev server..."
 	@cd $(BACKEND_DIR) && go run main.go &
+
+sync-upstream-local:
+	@bash scripts/sync_upstream_local.sh

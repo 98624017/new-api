@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -80,11 +81,16 @@ func validatePrompt(prompt string) *dto.TaskError {
 
 func validateMultipartTaskRequest(c *gin.Context, info *RelayInfo, action string) (TaskSubmitReq, error) {
 	var req TaskSubmitReq
-	if _, err := c.MultipartForm(); err != nil {
+	// 临时兼容上游 multipart + metadata 回归：
+	// 这里必须先走可复读的 body 缓存解析，否则后续 ValidateBasicTaskRequest
+	// 再调用 UnmarshalBodyReusable 时会遇到原始 Request.Body 已被消费，报 EOF。
+	// 后续如上游官方统一调整这段解析链路，可再按上游实现收口。
+	form, err := common.ParseMultipartFormReusable(c)
+	if err != nil {
 		return req, err
 	}
 
-	formData := c.Request.PostForm
+	formData := url.Values(form.Value)
 	req = TaskSubmitReq{
 		Prompt:   formData.Get("prompt"),
 		Model:    formData.Get("model"),
