@@ -173,6 +173,21 @@ docker run --name new-api -d --restart always \
 | ❓ 常见问题 | [FAQ](https://docs.newapi.pro/zh/docs/support/faq) |
 | 💬 社区交流 | [交流渠道](https://docs.newapi.pro/zh/docs/support/community-interaction) |
 
+### 🔄 项目内上游同步流程
+
+本仓库已内置一套“拉取 upstream -> 合并二开 -> 跑回归验证 -> 决定是否推送”的项目内流程。
+
+- 项目内 Skill：`tools/skills/newapi-upstream-sync/SKILL.md`
+- 本地命令：`make sync-upstream-local`
+- 直接推送：`PUSH_AFTER_SYNC=1 make sync-upstream-local`
+- 跳过测试：`SKIP_TESTS=1 make sync-upstream-local`
+
+说明：
+
+- 这是**本仓库专属**流程，不是全局 Skill
+- 默认会校验关键二开回归和本地上游兼容修复
+- 默认只做到本地合并和验证，通过后再由你决定是否推送
+
 ---
 
 ## ✨ 主要特性

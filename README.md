@@ -173,6 +173,22 @@ docker run --name new-api -d --restart always \
 | ❓ FAQ | [FAQ](https://docs.newapi.pro/en/docs/support/faq) |
 | 💬 Community Interaction | [Communication Channels](https://docs.newapi.pro/en/docs/support/community-interaction) |
 
+### 🔄 Project-Local Upstream Sync Flow
+
+This repository includes a project-local workflow for:
+`fetch upstream -> merge local customizations -> run regression checks -> decide whether to push`.
+
+- Project-local skill: `tools/skills/newapi-upstream-sync/SKILL.md`
+- Local command: `make sync-upstream-local`
+- Sync and push: `PUSH_AFTER_SYNC=1 make sync-upstream-local`
+- Skip tests: `SKIP_TESTS=1 make sync-upstream-local`
+
+Notes:
+
+- This is a **repository-local** workflow, not a global skill
+- It validates the key custom patch regressions and local compatibility fixes by default
+- It stops after local merge and verification unless push is explicitly requested
+
 ---
 
 ## ✨ Key Features
