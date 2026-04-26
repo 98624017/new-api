@@ -98,6 +98,7 @@ run_test() {
 }
 
 if [[ "$SKIP_TESTS" != "1" ]]; then
+  run_test "bash scripts/verify_patches.sh"
   run_test "go test ./controller -run '^TestTokenRedeem' -v"
   run_test "go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v"
   run_test "go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v"

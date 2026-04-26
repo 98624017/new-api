@@ -1,7 +1,7 @@
 FRONTEND_DIR = ./web
 BACKEND_DIR = .
 
-.PHONY: all build-frontend start-backend sync-upstream-local
+.PHONY: all build-frontend start-backend sync-upstream-local verify-patches
 
 all: build-frontend start-backend
 
@@ -15,3 +15,6 @@ start-backend:
 
 sync-upstream-local:
 	@bash scripts/sync_upstream_local.sh
+
+verify-patches:
+	@bash scripts/verify_patches.sh

@@ -130,3 +130,19 @@ For request structs that are parsed from client JSON and then re-marshaled to up
   - field absent in client JSON => `nil` => omitted on marshal;
   - field explicitly set to zero/false => non-`nil` pointer => must still be sent upstream.
 - Avoid using non-pointer scalars with `omitempty` for optional request parameters, because zero values (`0`, `0.0`, `false`) will be silently dropped during marshal.
+
+### Rule 7: Local Customizations — Keep Patch Files Current
+
+Any change that belongs to a local customization must update the corresponding files before merge:
+
+- Code or tests for an existing customization => update the matching `patches/NNN-*.patch`
+- Behavior, risk, or verification changes => update `docs/customizations/NNN-*.md`
+- New customization => add both `docs/customizations/NNN-*.md` and `patches/NNN-*.patch`, then register it in `docs/customizations/README.md` and `patches/README.md`
+
+Before considering a local customization complete, run:
+
+```bash
+make verify-patches
+```
+
+This verifies that customization docs and patches are paired, and that all `patches/*.patch` can be applied in order to `upstream/main`.

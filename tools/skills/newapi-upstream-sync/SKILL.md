@@ -76,6 +76,7 @@ scripts/sync_upstream_local.sh
 默认验证以下回归点：
 
 ```bash
+make verify-patches
 go test ./controller -run '^TestTokenRedeem' -v
 go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v
 go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v
@@ -83,6 +84,7 @@ go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata
 
 原因：
 
+- 第 0 组验证二开 patch 登记完整，并能按顺序应用到 `upstream/main`
 - 第 1 组验证 `001-token-redeem-via-apikey`
 - 第 2 组验证 `002-task-refund-restore-token-quota`
 - 第 3 组验证上游 multipart 任务请求回归的本地兼容修复
@@ -122,3 +124,4 @@ docs/customizations/README.md
 - `.spec-workflow/` 默认允许保持未跟踪状态，不阻塞同步
 - 这个技能假设远端命名仍为 `origin` / `upstream`
 - 如果后续新增 patch，记得同步更新脚本验证清单和本技能内容
+- 修改既有二开时，先更新对应 `patches/NNN-*.patch`，再合并

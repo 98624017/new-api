@@ -156,6 +156,11 @@ jobs:
             echo "::notice::No changes after applying patches"
           fi
 
+      - name: Verify patch registry
+        if: inputs.dry_run == false
+        run: |
+          bash scripts/verify_patches.sh
+
       - name: Set up Go
         if: inputs.dry_run == false
         uses: actions/setup-go@v3

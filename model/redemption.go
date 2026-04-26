@@ -113,7 +113,11 @@ func GetRedemptionById(id int) (*Redemption, error) {
 	return &redemption, err
 }
 
-func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redemption) error) (quota int, err error) {
+func defaultRedemptionLogContent(redemption *Redemption) string {
+	return fmt.Sprintf("通过兑换码充值 %s，兑换码ID %d", logger.LogQuota(redemption.Quota), redemption.Id)
+}
+
+func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redemption) (logContent string, err error)) (quota int, err error) {
 	if key == "" {
 		return 0, errors.New("未提供兑换码")
 	}
@@ -121,6 +125,7 @@ func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redempti
 		return 0, errors.New("无效的 user id")
 	}
 	redemption := &Redemption{}
+	logContent := ""
 
 	keyCol := "`key`"
 	if common.UsingPostgreSQL {
@@ -143,7 +148,7 @@ func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redempti
 			return err
 		}
 		if apply != nil {
-			err = apply(tx, redemption)
+			logContent, err = apply(tx, redemption)
 			if err != nil {
 				return err
 			}
@@ -158,7 +163,10 @@ func redeem(key string, userId int, apply func(tx *gorm.DB, redemption *Redempti
 		common.SysError("redemption failed: " + err.Error())
 		return 0, ErrRedeemFailed
 	}
-	RecordLog(userId, LogTypeTopup, fmt.Sprintf("通过兑换码充值 %s，兑换码ID %d", logger.LogQuota(redemption.Quota), redemption.Id))
+	if logContent == "" {
+		logContent = defaultRedemptionLogContent(redemption)
+	}
+	RecordLog(userId, LogTypeTopup, logContent)
 	return redemption.Quota, nil
 }
 
@@ -170,7 +178,11 @@ func RedeemByToken(key string, userId int, tokenId int, tokenKey string) (quota 
 	if tokenId == 0 || tokenKey == "" {
 		return 0, errors.New("无效的令牌")
 	}
-	quota, err = redeem(key, userId, func(tx *gorm.DB, redemption *Redemption) error {
+	quota, err = redeem(key, userId, func(tx *gorm.DB, redemption *Redemption) (string, error) {
+		token := &Token{}
+		if err := tx.Select("name").Where("id = ? AND user_id = ?", tokenId, userId).First(token).Error; err != nil {
+			return "", err
+		}
 		result := tx.Model(&Token{}).Where("id = ? AND user_id = ?", tokenId, userId).Updates(
 			map[string]interface{}{
 				"remain_quota":  gorm.Expr("remain_quota + ?", redemption.Quota),
@@ -178,12 +190,12 @@ func RedeemByToken(key string, userId int, tokenId int, tokenKey string) (quota 
 			},
 		)
 		if result.Error != nil {
-			return result.Error
+			return "", result.Error
 		}
 		if result.RowsAffected == 0 {
-			return errors.New("无效的令牌")
+			return "", errors.New("无效的令牌")
 		}
-		return nil
+		return fmt.Sprintf("%s，兑换到令牌「%s」", defaultRedemptionLogContent(redemption), token.Name), nil
 	})
 	if err != nil {
 		return 0, err

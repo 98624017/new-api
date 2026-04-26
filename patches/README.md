@@ -13,6 +13,19 @@
 
 ## 使用方法
 
+### 校验补丁（每次合并前必须执行）
+
+```bash
+make verify-patches
+```
+
+该命令会检查：
+
+- `patches/NNN-*.patch` 与 `docs/customizations/NNN-*.md` 是否一一对应
+- `patches/README.md` 与 `docs/customizations/README.md` 是否登记了对应二开
+- 所有 patch 是否能按编号顺序应用到 `upstream/main`
+- 当前工作区如果有源码改动，是否同步修改了至少一个 `patches/*.patch`
+
 ### 自动应用（推荐先尝试）
 
 ```bash
@@ -34,13 +47,17 @@ git apply --3way patches/001-token-redeem-via-apikey.patch
 
 ## 001-token-redeem-via-apikey.patch
 
-**功能**：兑换码免登录兑换 — 通过 API Key (sk-xxx) 认证兑换，供 neko-api-key-tool 等外部工具使用；兑换成功时同时补到用户钱包和当前 token/key 额度。
+**功能**：兑换码免登录兑换 — 通过 API Key (sk-xxx) 认证兑换，供 neko-api-key-tool 等外部工具使用；兑换成功时同时补到用户钱包和当前 token/key 额度，并在充值使用记录中显示兑换到的 token/key 名称。
 
-**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session。此补丁新增 `POST /api/token/redeem`，使用 `TokenAuthReadOnly` 中间件，允许通过 Bearer sk-xxx 免登录兑换；并在兑换成功时同步增加当前 token 的额度，方便 API Key 二次分发场景维持账实一致。
+**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session。此补丁新增 `POST /api/token/redeem`，使用 `TokenAuthReadOnly` 中间件，允许通过 Bearer sk-xxx 免登录兑换；并在兑换成功时同步增加当前 token 的额度，方便 API Key 二次分发场景维持账实一致。充值日志会追加 token/key 名称，便于后续在使用记录中追踪具体兑换目标。
 
-**涉及文件（4 个）**：
+**涉及文件（5 个）**：
 
-### 1. `controller/user.go`
+### 1. `controller/token_test.go`
+
+在 token 控制器测试的临时 DB helper 中保存并恢复 `model.DB` / `model.LOG_DB`，避免本补丁新增的外部包兑换测试与现有 controller 包测试互相污染全局 DB。
+
+### 2. `controller/user.go`
 
 在 `TopUp` 函数后面（`type UpdateUserSettingRequest struct` 之前）插入 `TokenRedeem` 函数：
 
@@ -82,17 +99,18 @@ func TokenRedeem(c *gin.Context) {
 
 **依赖**：复用同文件中已有的 `topUpRequest`、`getTopUpLock`，以及 `model.RedeemByToken`、`common.ApiError` 等。
 
-### 2. `model/redemption.go`
+### 3. `model/redemption.go`
 
 新增 token 场景兑换逻辑 `RedeemByToken`：
 
 - 在同一事务内增加用户钱包 quota
 - 同时增加当前 token 的 `remain_quota`
+- 读取当前 token 名称，并写入充值使用记录
 - 一并核销兑换码
 
 这样不会出现“钱包加了但 key 没加”的中间不一致状态。
 
-### 3. `router/api-router.go`
+### 4. `router/api-router.go`
 
 在 `usageRoute` 块结束后、`redemptionRoute` 块开始前，插入一行路由注册：
 
@@ -103,13 +121,14 @@ apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(
 
 **定位标志**：找到 `tokenUsageRoute.GET("/", controller.GetTokenUsage)` 所在块的结束括号 `}`，在其后插入上述路由。
 
-### 4. `controller/user_token_redeem_test.go`
+### 5. `controller/user_token_redeem_test.go`
 
 补充控制器回归测试，重点验证：
 
 - `Bearer sk-xxx` 可直接进入兑换链路
 - 成功后用户钱包增加
 - 成功后当前 token 的 `remain_quota` 同步增加
+- 成功后的充值使用记录包含 token/key 名称
 
 ### 回归验证
 
@@ -124,6 +143,7 @@ go test ./controller -run '^TestTokenRedeem' -v
 - `Bearer sk-xxx` 可直接兑换
 - 成功后用户钱包增加
 - 成功后当前 token 额度同步增加
+- 成功后使用记录显示兑换到的 token/key 名称
 
 ---
 

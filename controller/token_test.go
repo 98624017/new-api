@@ -52,6 +52,8 @@ func setupTokenControllerTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open sqlite db: %v", err)
 	}
+	previousDB := model.DB
+	previousLogDB := model.LOG_DB
 	model.DB = db
 	model.LOG_DB = db
 
@@ -60,6 +62,8 @@ func setupTokenControllerTestDB(t *testing.T) *gorm.DB {
 	}
 
 	t.Cleanup(func() {
+		model.DB = previousDB
+		model.LOG_DB = previousLogDB
 		sqlDB, err := db.DB()
 		if err == nil {
 			_ = sqlDB.Close()

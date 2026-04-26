@@ -70,11 +70,16 @@ func seedRedeemUser(t *testing.T, id int, quota int) {
 
 func seedRedeemToken(t *testing.T, id int, userID int, key string, remainQuota int, usedQuota int) {
 	t.Helper()
+	seedRedeemTokenWithName(t, id, userID, key, "redeem_token", remainQuota, usedQuota)
+}
+
+func seedRedeemTokenWithName(t *testing.T, id int, userID int, key string, name string, remainQuota int, usedQuota int) {
+	t.Helper()
 	token := &model.Token{
 		Id:          id,
 		UserId:      userID,
 		Key:         key,
-		Name:        "redeem_token",
+		Name:        name,
 		Status:      common.TokenStatusEnabled,
 		RemainQuota: remainQuota,
 		UsedQuota:   usedQuota,
@@ -146,6 +151,13 @@ func getRedemptionForTest(t *testing.T, key string) *model.Redemption {
 	return &redemption
 }
 
+func getLatestTopupLogForTest(t *testing.T, userID int) *model.Log {
+	t.Helper()
+	var log model.Log
+	require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", userID, model.LogTypeTopup).Order("id desc").First(&log).Error)
+	return &log
+}
+
 func TestTokenRedeem_Success(t *testing.T) {
 	truncateTables(t)
 
@@ -182,6 +194,27 @@ func TestTokenRedeem_Success(t *testing.T) {
 	redemption := getRedemptionForTest(t, redeemKey)
 	assert.Equal(t, common.RedemptionCodeStatusUsed, redemption.Status)
 	assert.Equal(t, userID, redemption.UsedUserId)
+}
+
+func TestTokenRedeem_LogIncludesTokenName(t *testing.T) {
+	truncateTables(t)
+
+	const userID = 11
+	const tokenID = 11
+	const tokenKey = "tokenredeem11"
+	const tokenName = "Claude 专用令牌"
+	const redeemKey = "redeem-code-011"
+
+	seedRedeemUser(t, userID, 0)
+	seedRedeemTokenWithName(t, tokenID, userID, tokenKey, tokenName, 0, 0)
+	seedRedemptionCode(t, 11, redeemKey, 500000)
+
+	w := performTokenRedeemRequest(t, makeTokenRedeemRouter(), "Bearer sk-"+tokenKey, redeemKey)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	log := getLatestTopupLogForTest(t, userID)
+	assert.Contains(t, log.Content, tokenName)
+	assert.Contains(t, log.Content, "兑换到令牌")
 }
 
 func TestTokenRedeem_InvalidToken(t *testing.T) {

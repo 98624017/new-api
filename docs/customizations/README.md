@@ -10,6 +10,7 @@
 ## 维护原则
 
 - 二开优先做成独立补丁，不直接把长期差异散落在工作区
+- 二开代码改动必须先同步更新对应 patch，再合并
 - 编号是永久 ID，`docs/customizations` 与 `patches` 必须一一对应
 - patch 只承载代码差异，不承载完整业务背景
 - 业务背景、规则、风险、测试方式统一记录在 `docs/customizations`
@@ -19,10 +20,13 @@
 
 ### 001-token-redeem-via-apikey
 
-- 目标：允许通过 API Key (`Bearer sk-xxx`) 直接兑换兑换码
-- 影响范围：兑换接口、Token 认证链路
+- 目标：允许通过 API Key (`Bearer sk-xxx`) 直接兑换兑换码，并在充值日志中记录兑换到的 token/key 名称
+- 影响范围：兑换接口、Token 认证链路、充值使用记录
 - 关联文件：
+  - `controller/token_test.go`
   - `controller/user.go`
+  - `controller/user_token_redeem_test.go`
+  - `model/redemption.go`
   - `router/api-router.go`
   - `patches/001-token-redeem-via-apikey.patch`
 
@@ -51,6 +55,7 @@
 ## 推荐验证命令
 
 ```bash
+make verify-patches
 go test ./controller -run '^TestTokenRedeem' -v
 go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 go build ./...
