@@ -196,6 +196,7 @@ func TaskErrorWrapper(err error, code string, statusCode int) *dto.TaskError {
 		//text = "请求上游地址失败"
 		text = common.MaskSensitiveInfo(text)
 	}
+	text = common.MaskBillingAmountsForClient(text)
 	//避免暴露内部错误
 	taskError := &dto.TaskError{
 		Code:       code,
@@ -214,7 +215,7 @@ func TaskErrorFromAPIError(apiErr *types.NewAPIError) *dto.TaskError {
 	}
 	return &dto.TaskError{
 		Code:       string(apiErr.GetErrorCode()),
-		Message:    apiErr.Err.Error(),
+		Message:    common.MaskBillingAmountsForClient(apiErr.Err.Error()),
 		StatusCode: apiErr.StatusCode,
 		Error:      apiErr.Err,
 	}

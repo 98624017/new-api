@@ -17,7 +17,9 @@ var (
 	maskDomainPattern = regexp.MustCompile(`\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b`)
 	maskIPPattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
-	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+	maskApiKeyPattern                = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+	maskBillingCurrencyAmountPattern = regexp.MustCompile(`([¥￥$€£])\s*-?\d+(,\d{3})*(\.\d+)?`)
+	maskBillingLabelAmountPattern    = regexp.MustCompile(`(?i)((用户剩余额度|剩余额度|需要预扣费额度|预扣费额度|令牌剩余额度|token remain quota|remain quota|remaining quota|user quota|need quota|required quota|available quota|balance|credit|quota|amount|cost|price|need)\s*[:：=]\s*)([¥￥$€£]\s*)?-?\d+(,\d{3})*(\.\d+)?`)
 )
 
 func GetStringIfEmpty(str string, defaultValue string) string {
@@ -250,5 +252,13 @@ func MaskSensitiveInfo(str string) string {
 	// Mask API keys (e.g., "api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70" -> "api_key:***")
 	str = maskApiKeyPattern.ReplaceAllString(str, "${1}api_key:***${3}")
 
+	return str
+}
+
+// MaskBillingAmountsForClient hides concrete billing/quota amounts while
+// keeping the surrounding error text readable for downstream clients.
+func MaskBillingAmountsForClient(str string) string {
+	str = maskBillingCurrencyAmountPattern.ReplaceAllString(str, "${1}***")
+	str = maskBillingLabelAmountPattern.ReplaceAllString(str, "${1}${3}***")
 	return str
 }

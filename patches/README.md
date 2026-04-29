@@ -233,6 +233,52 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 ---
 
+## 003-mask-billing-amounts-in-errors.patch
+
+**功能**：下游客户端错误响应金额脱敏。
+
+**背景**：预扣费失败、额度不足或部分上游错误文案可能带出具体金额 / 额度数值，例如 `用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900`。这些数值可能暴露本地成本价、预扣费策略或上游额度细节，不适合透传给下游客户。
+
+**涉及文件（6 个）**：
+
+### 1. `common/str.go`
+
+新增 `MaskBillingAmountsForClient`，只脱敏常见计费金额和额度标签后的数字：
+
+- `¥0.056700` -> `¥***`
+- `token remain quota: 120` -> `token remain quota: ***`
+- `need=69900` -> `need=***`
+
+### 2. `types/error.go`
+
+在 `ToOpenAIError` / `ToClaudeError` 中调用金额脱敏，覆盖同步 relay 的 OpenAI / Claude 风格错误响应。
+
+### 3. `service/error.go`
+
+在 `TaskErrorWrapper` / `TaskErrorFromAPIError` 中调用金额脱敏，覆盖异步任务错误响应。
+
+### 4. `common/billing_amount_mask_test.go`
+
+覆盖中文预扣费金额、英文额度标签、订阅 `need=` 文案，以及 `status_code` / `request id` 不被误伤。
+
+### 5. `types/error_test.go`
+
+覆盖 OpenAI / Claude 错误转换中的金额脱敏。
+
+### 6. `service/error_test.go`
+
+覆盖异步任务错误包装中的金额脱敏。
+
+### 回归验证
+
+```bash
+go test ./common -run TestMaskBillingAmountsForClient -count=1
+go test ./types -run TestNewAPIErrorTo -count=1
+go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -count=1
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列

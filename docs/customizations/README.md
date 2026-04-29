@@ -36,6 +36,12 @@
 - 影响范围：异步任务计费、任务轮询、token quota 调整
 - 当前状态：已实现，并已生成 `patches/002-task-refund-restore-token-quota.patch`
 
+### 003-mask-billing-amounts-in-errors
+
+- 目标：面向下游客户端的错误响应中保留额度错误语义，但脱敏具体金额 / 额度数值
+- 影响范围：OpenAI / Claude 风格错误响应、异步任务错误响应、客户端错误脱敏
+- 当前状态：已实现，并已生成 `patches/003-mask-billing-amounts-in-errors.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -58,5 +64,7 @@
 make verify-patches
 go test ./controller -run '^TestTokenRedeem' -v
 go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
+go test ./common -run TestMaskBillingAmountsForClient -count=1
+go test ./types -run TestNewAPIErrorTo -count=1
 go build ./...
 ```
