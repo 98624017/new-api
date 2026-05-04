@@ -11,7 +11,7 @@ on:
       push_latest:
         description: "Also update ghcr latest tag"
         required: false
-        default: false
+        default: true
         type: boolean
       reason:
         description: "Optional reason for this manual build"
