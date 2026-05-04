@@ -42,6 +42,12 @@
 - 影响范围：OpenAI / Claude 风格错误响应、异步任务错误响应、客户端错误脱敏
 - 当前状态：已实现，并已生成 `patches/003-mask-billing-amounts-in-errors.patch`
 
+### 004-sora-reference-video-double-price
+
+- 目标：Sora 兼容 `/v1/videos` 请求中，环境变量白名单模型携带参考视频时按双倍计价
+- 影响范围：异步视频任务请求解析、Sora 任务计费估算、任务 `OtherRatios`
+- 当前状态：已实现，并已生成 `patches/004-sora-reference-video-double-price.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`

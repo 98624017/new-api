@@ -153,7 +153,7 @@ go test ./controller -run '^TestTokenRedeem' -v
 
 **背景**：对于做 API Key 二次分发的用户，仅退款到钱包不够，失败任务还需要按开关决定是否恢复 token 可用额度。当前实现引入环境变量 `TASK_REFUND_RESTORE_TOKEN_QUOTA`，默认关闭；开启后，失败退款会同时恢复 token 额度。
 
-**涉及文件（4 个）**：
+**涉及文件（5 个）**：
 
 ### 1. `common/constants.go`
 
@@ -275,6 +275,56 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 go test ./common -run TestMaskBillingAmountsForClient -count=1
 go test ./types -run TestNewAPIErrorTo -count=1
 go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -count=1
+```
+
+---
+
+## 004-sora-reference-video-double-price.patch
+
+**功能**：Sora 兼容 `/v1/videos` 请求中，白名单模型携带参考视频时按双倍计价。
+
+**背景**：部分视频生成模型在请求体 `content` 中携带 `video_url` 参考视频时，上游成本不同于普通文生视频请求。为了避免影响其他模型，本补丁只对环境变量 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 白名单中的模型生效。
+
+**涉及文件（4 个）**：
+
+### 1. `relay/common/relay_info.go`
+
+在 `TaskSubmitReq` 中新增 `Content []map[string]any`，用于保留 `/v1/videos` JSON 请求体顶层 `content` 数组。
+
+### 2. `relay/channel/task/sora/constants.go`
+
+新增环境变量白名单加载逻辑。默认白名单为空，不配置时任何模型都不会触发参考视频双倍计价。多个模型用英文逗号分隔：
+
+```bash
+SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS=seedance-2.0,seedance-2.0-pro
+```
+
+### 3. `main.go`
+
+在 `godotenv.Load(".env")` 和 `common.InitEnv()` 之后调用 `soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()`，确保 `.env` 中的 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 能被读取。
+
+### 4. `relay/channel/task/sora/adaptor.go`
+
+在 `EstimateBilling` 中追加判断：
+
+- 模型名在环境变量白名单内
+- `content` 中存在 `type == "video_url"` 或 `video_url` 字段
+
+两个条件同时满足时返回 `video_input: 2`，由现有 `OtherRatios` 机制乘入最终额度。
+
+### 5. `relay/channel/task/sora/adaptor_test.go`
+
+新增回归测试：
+
+- 环境变量包含 `seedance-2.0` 时，`seedance-2.0` + `content.video_url` 返回 `video_input: 2`
+- 环境变量为空时，`seedance-2.0` + `content.video_url` 不返回 `video_input`
+- 环境变量变更只有显式 reload 后才会生效，避免包级初始化提前读取 `.env` 前的空值
+
+### 回归验证
+
+```bash
+go test ./relay/channel/task/sora
+go test ./relay/common
 ```
 
 ---

@@ -1,8 +1,44 @@
 package sora
 
+import (
+	"os"
+	"strings"
+	"sync"
+)
+
 var ModelList = []string{
 	"sora-2",
 	"sora-2-pro",
 }
 
 var ChannelName = "sora"
+
+var (
+	referenceVideoDoublePriceModelsMu sync.RWMutex
+	ReferenceVideoDoublePriceModels   = map[string]bool{}
+)
+
+func ReloadReferenceVideoDoublePriceModelsFromEnv() {
+	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
+	referenceVideoDoublePriceModelsMu.Lock()
+	defer referenceVideoDoublePriceModelsMu.Unlock()
+	ReferenceVideoDoublePriceModels = models
+}
+
+func IsReferenceVideoDoublePriceModel(modelName string) bool {
+	referenceVideoDoublePriceModelsMu.RLock()
+	defer referenceVideoDoublePriceModelsMu.RUnlock()
+	return ReferenceVideoDoublePriceModels[modelName]
+}
+
+func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
+	models := map[string]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		model := strings.TrimSpace(item)
+		if model == "" {
+			continue
+		}
+		models[model] = true
+	}
+	return models
+}

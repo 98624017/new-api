@@ -1,0 +1,210 @@
+diff --git a/main.go b/main.go
+index dbbf44a18..ac78a5814 100644
+--- a/main.go
++++ b/main.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/oauth"
+ 	"github.com/QuantumNous/new-api/relay"
++	soratask "github.com/QuantumNous/new-api/relay/channel/task/sora"
+ 	"github.com/QuantumNous/new-api/router"
+ 	"github.com/QuantumNous/new-api/service"
+ 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
+@@ -251,6 +252,7 @@ func InitResources() error {
+ 
+ 	// 加载环境变量
+ 	common.InitEnv()
++	soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()
+ 
+ 	logger.SetupLogger()
+ 
+diff --git a/relay/channel/task/sora/adaptor.go b/relay/channel/task/sora/adaptor.go
+index e9029aa20..738c1a6f5 100644
+--- a/relay/channel/task/sora/adaptor.go
++++ b/relay/channel/task/sora/adaptor.go
+@@ -126,9 +126,34 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+ 	if size == "1792x1024" || size == "1024x1792" {
+ 		ratios["size"] = 1.666667
+ 	}
++	if shouldDoublePriceReferenceVideo(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
++		ratios["video_input"] = 2
++	}
+ 	return ratios
+ }
+ 
++func shouldDoublePriceReferenceVideo(modelName string, req relaycommon.TaskSubmitReq) bool {
++	if modelName == "" {
++		modelName = req.Model
++	}
++	return IsReferenceVideoDoublePriceModel(modelName)
++}
++
++func hasReferenceVideo(content []map[string]any) bool {
++	for _, item := range content {
++		if item == nil {
++			continue
++		}
++		if item["type"] == "video_url" {
++			return true
++		}
++		if _, ok := item["video_url"]; ok {
++			return true
++		}
++	}
++	return false
++}
++
+ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
+ 	if info.Action == constant.TaskActionRemix {
+ 		return fmt.Sprintf("%s/v1/videos/%s/remix", a.baseURL, info.OriginTaskID), nil
+diff --git a/relay/channel/task/sora/constants.go b/relay/channel/task/sora/constants.go
+index e2f6536ea..b09b37399 100644
+--- a/relay/channel/task/sora/constants.go
++++ b/relay/channel/task/sora/constants.go
+@@ -1,8 +1,44 @@
+ package sora
+ 
++import (
++	"os"
++	"strings"
++	"sync"
++)
++
+ var ModelList = []string{
+ 	"sora-2",
+ 	"sora-2-pro",
+ }
+ 
+ var ChannelName = "sora"
++
++var (
++	referenceVideoDoublePriceModelsMu sync.RWMutex
++	ReferenceVideoDoublePriceModels   = map[string]bool{}
++)
++
++func ReloadReferenceVideoDoublePriceModelsFromEnv() {
++	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
++	referenceVideoDoublePriceModelsMu.Lock()
++	defer referenceVideoDoublePriceModelsMu.Unlock()
++	ReferenceVideoDoublePriceModels = models
++}
++
++func IsReferenceVideoDoublePriceModel(modelName string) bool {
++	referenceVideoDoublePriceModelsMu.RLock()
++	defer referenceVideoDoublePriceModelsMu.RUnlock()
++	return ReferenceVideoDoublePriceModels[modelName]
++}
++
++func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
++	models := map[string]bool{}
++	for _, item := range strings.Split(raw, ",") {
++		model := strings.TrimSpace(item)
++		if model == "" {
++			continue
++		}
++		models[model] = true
++	}
++	return models
++}
+diff --git a/relay/common/relay_info.go b/relay/common/relay_info.go
+index 2e157fc8c..b9d2e059a 100644
+--- a/relay/common/relay_info.go
++++ b/relay/common/relay_info.go
+@@ -673,6 +673,7 @@ type TaskSubmitReq struct {
+ 	Mode           string                 `json:"mode,omitempty"`
+ 	Image          string                 `json:"image,omitempty"`
+ 	Images         []string               `json:"images,omitempty"`
++	Content        []map[string]any       `json:"content,omitempty"`
+ 	Size           string                 `json:"size,omitempty"`
+ 	Duration       int                    `json:"duration,omitempty"`
+ 	Seconds        string                 `json:"seconds,omitempty"`
+diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
+new file mode 100644
+index 000000000..5a072ac72
+--- /dev/null
++++ b/relay/channel/task/sora/adaptor_test.go
+@@ -0,0 +1,84 @@
++package sora
++
++import (
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/QuantumNous/new-api/relay/common"
++	"github.com/gin-gonic/gin"
++)
++
++func TestEstimateBillingDoublesWhenEnvConfiguredModelHasReferenceVideo(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
++	if ratios["video_input"] != 2 {
++		t.Fatalf("expected video_input ratio 2, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingDoesNotDoubleWhenEnvDoesNotListModel(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio without env whitelist, got %#v", ratios)
++	}
++}
++
++func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	if IsReferenceVideoDoublePriceModel("seedance-2.0") {
++		t.Fatal("expected env change not to load until explicit reload")
++	}
++
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	if !IsReferenceVideoDoublePriceModel("seedance-2.0") {
++		t.Fatal("expected explicit reload to load env whitelist")
++	}
++}
++
++func estimateBillingForBody(t *testing.T, body string) map[string]float64 {
++	t.Helper()
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	c.Request = req
++
++	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{}}
++	adaptor := &TaskAdaptor{}
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++
++	return adaptor.EstimateBilling(c, info)
++}
++
++func referenceVideoRequestBody(modelName string) string {
++	return `{
++		"model": "` + modelName + `",
++		"duration": 10,
++		"generate_audio": true,
++		"ratio": "16:9",
++		"prompt": "placeholder",
++		"content": [
++			{"type": "text", "text": "keep identity"},
++			{
++				"type": "video_url",
++				"role": "reference_video",
++				"video_url": {"url": "https://example.com/reference.mp4"}
++			}
++		]
++	}`
++}

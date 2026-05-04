@@ -126,7 +126,32 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if size == "1792x1024" || size == "1024x1792" {
 		ratios["size"] = 1.666667
 	}
+	if shouldDoublePriceReferenceVideo(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
+		ratios["video_input"] = 2
+	}
 	return ratios
+}
+
+func shouldDoublePriceReferenceVideo(modelName string, req relaycommon.TaskSubmitReq) bool {
+	if modelName == "" {
+		modelName = req.Model
+	}
+	return IsReferenceVideoDoublePriceModel(modelName)
+}
+
+func hasReferenceVideo(content []map[string]any) bool {
+	for _, item := range content {
+		if item == nil {
+			continue
+		}
+		if item["type"] == "video_url" {
+			return true
+		}
+		if _, ok := item["video_url"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {

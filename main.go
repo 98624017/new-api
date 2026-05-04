@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/relay"
+	soratask "github.com/QuantumNous/new-api/relay/channel/task/sora"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
@@ -251,6 +252,7 @@ func InitResources() error {
 
 	// 加载环境变量
 	common.InitEnv()
+	soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()
 
 	logger.SetupLogger()
 
