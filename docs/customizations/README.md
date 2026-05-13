@@ -48,6 +48,12 @@
 - 影响范围：异步视频任务请求解析、Sora 任务计费估算、任务 `OtherRatios`
 - 当前状态：已实现，并已生成 `patches/004-sora-reference-video-double-price.patch`
 
+### 005-task-list-via-apikey
+
+- 目标：允许通过 API Key (`Bearer sk-xxx`) 免登录查询“当前 key 创建的异步任务列表 / task_id”
+- 影响范围：任务列表接口、任务落库字段、老任务 token 兼容查询
+- 当前状态：已实现，并已生成 `patches/005-task-list-via-apikey.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -69,8 +75,9 @@
 ```bash
 make verify-patches
 go test ./controller -run '^TestTokenRedeem' -v
+go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
 go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 go test ./common -run TestMaskBillingAmountsForClient -count=1
-go test ./types -run TestNewAPIErrorTo -count=1
+go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 go build ./...
 ```

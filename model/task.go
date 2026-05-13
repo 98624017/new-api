@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
+	"gorm.io/gorm"
 )
 
 type TaskStatus string
@@ -48,7 +49,8 @@ type Task struct {
 	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
 	Platform   constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
 	UserId     int                   `json:"user_id" gorm:"index"`
-	Group      string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
+	TokenId    int                   `json:"token_id" gorm:"index;default:0"` // 任务创建时绑定的 token id
+	Group      string                `json:"group" gorm:"type:varchar(50)"`   // 修正计费用
 	ChannelId  int                   `json:"channel_id" gorm:"index"`
 	Quota      int                   `json:"quota"`
 	Action     string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
@@ -135,6 +137,15 @@ func (t *Task) GetResultURL() string {
 	return t.FailReason
 }
 
+// GetEffectiveTokenID 返回任务实际绑定的 token id。
+// 新数据优先使用独立列；老数据回退到 private_data 中的历史值。
+func (t *Task) GetEffectiveTokenID() int {
+	if t.TokenId > 0 {
+		return t.TokenId
+	}
+	return t.PrivateData.TokenId
+}
+
 // GenerateTaskID 生成对外暴露的 task_xxxx 格式 ID
 func GenerateTaskID() string {
 	key, _ := common.GenerateRandomCharsKey(32)
@@ -213,27 +224,7 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
 	var err error
 
 	// 初始化查询构建器
-	query := DB.Where("user_id = ?", userId)
-
-	if queryParams.TaskID != "" {
-		query = query.Where("task_id = ?", queryParams.TaskID)
-	}
-	if queryParams.Action != "" {
-		query = query.Where("action = ?", queryParams.Action)
-	}
-	if queryParams.Status != "" {
-		query = query.Where("status = ?", queryParams.Status)
-	}
-	if queryParams.Platform != "" {
-		query = query.Where("platform = ?", queryParams.Platform)
-	}
-	if queryParams.StartTimestamp != 0 {
-		// 假设您已将前端传来的时间戳转换为数据库所需的时间格式，并处理了时间戳的验证和解析
-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
-	}
-	if queryParams.EndTimestamp != 0 {
-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
-	}
+	query := applyTaskQueryFilters(DB.Where("user_id = ?", userId), queryParams)
 
 	// 获取数据
 	err = query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
@@ -249,36 +240,7 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 	var err error
 
 	// 初始化查询构建器
-	query := DB
-
-	// 添加过滤条件
-	if queryParams.ChannelID != "" {
-		query = query.Where("channel_id = ?", queryParams.ChannelID)
-	}
-	if queryParams.Platform != "" {
-		query = query.Where("platform = ?", queryParams.Platform)
-	}
-	if queryParams.UserID != "" {
-		query = query.Where("user_id = ?", queryParams.UserID)
-	}
-	if len(queryParams.UserIDs) != 0 {
-		query = query.Where("user_id in (?)", queryParams.UserIDs)
-	}
-	if queryParams.TaskID != "" {
-		query = query.Where("task_id = ?", queryParams.TaskID)
-	}
-	if queryParams.Action != "" {
-		query = query.Where("action = ?", queryParams.Action)
-	}
-	if queryParams.Status != "" {
-		query = query.Where("status = ?", queryParams.Status)
-	}
-	if queryParams.StartTimestamp != 0 {
-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
-	}
-	if queryParams.EndTimestamp != 0 {
-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
-	}
+	query := applyTaskQueryFilters(DB, queryParams)
 
 	// 获取数据
 	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
@@ -438,7 +400,62 @@ type TaskQuotaUsage struct {
 // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
 func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	var total int64
-	query := DB.Model(&Task{})
+	query := applyTaskQueryFilters(DB.Model(&Task{}), queryParams)
+	_ = query.Count(&total).Error
+	return total
+}
+
+// TaskCountAllUserTask returns total tasks for given user
+func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
+	var total int64
+	query := applyTaskQueryFilters(DB.Model(&Task{}).Where("user_id = ?", userId), queryParams)
+	_ = query.Count(&total).Error
+	return total
+}
+
+func TaskCountAllUserTokenTask(userId int, tokenId int, queryParams SyncTaskQueryParams) int64 {
+	var total int64
+	query := applyTaskQueryFilters(DB.Model(&Task{}).Where("user_id = ? AND token_id = ?", userId, tokenId), queryParams)
+	_ = query.Count(&total).Error
+	return total
+}
+
+func TaskGetAllUserTokenTask(userId int, tokenId int, startIdx int, num int, queryParams SyncTaskQueryParams) []*Task {
+	var tasks []*Task
+	query := applyTaskQueryFilters(DB.Where("user_id = ? AND token_id = ?", userId, tokenId), queryParams)
+	if err := query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error; err != nil {
+		return nil
+	}
+	return tasks
+}
+
+// SyncLegacyTaskTokenIDsForUser 将历史任务里只存在于 private_data 的 token_id 回填到独立列。
+func SyncLegacyTaskTokenIDsForUser(userId int) error {
+	var legacyTasks []*Task
+	if err := DB.Select("id", "token_id", "private_data").
+		Where("user_id = ? AND (token_id = 0 OR token_id IS NULL)", userId).
+		Find(&legacyTasks).Error; err != nil {
+		return err
+	}
+
+	taskIDsByToken := make(map[int][]int64)
+	for _, task := range legacyTasks {
+		tokenId := task.GetEffectiveTokenID()
+		if tokenId <= 0 {
+			continue
+		}
+		taskIDsByToken[tokenId] = append(taskIDsByToken[tokenId], task.ID)
+	}
+
+	for tokenId, ids := range taskIDsByToken {
+		if err := DB.Model(&Task{}).Where("id in (?)", ids).Update("token_id", tokenId).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyTaskQueryFilters(query *gorm.DB, queryParams SyncTaskQueryParams) *gorm.DB {
 	if queryParams.ChannelID != "" {
 		query = query.Where("channel_id = ?", queryParams.ChannelID)
 	}
@@ -466,34 +483,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	if queryParams.EndTimestamp != 0 {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
-	return total
-}
-
-// TaskCountAllUserTask returns total tasks for given user
-func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
-	var total int64
-	query := DB.Model(&Task{}).Where("user_id = ?", userId)
-	if queryParams.TaskID != "" {
-		query = query.Where("task_id = ?", queryParams.TaskID)
-	}
-	if queryParams.Action != "" {
-		query = query.Where("action = ?", queryParams.Action)
-	}
-	if queryParams.Status != "" {
-		query = query.Where("status = ?", queryParams.Status)
-	}
-	if queryParams.Platform != "" {
-		query = query.Where("platform = ?", queryParams.Platform)
-	}
-	if queryParams.StartTimestamp != 0 {
-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
-	}
-	if queryParams.EndTimestamp != 0 {
-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
-	}
-	_ = query.Count(&total).Error
-	return total
+	return query
 }
 func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 	openAIVideo := dto.NewOpenAIVideo()

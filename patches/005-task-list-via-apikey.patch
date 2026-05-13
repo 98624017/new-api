@@ -1,0 +1,450 @@
+diff --git a/controller/relay.go b/controller/relay.go
+index c97ab45b4..950780f1a 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -574,6 +574,7 @@ func RelayTask(c *gin.Context) {
+ 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
+ 		task.PrivateData.BillingSource = relayInfo.BillingSource
+ 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
++		task.TokenId = relayInfo.TokenId
+ 		task.PrivateData.TokenId = relayInfo.TokenId
+ 		task.PrivateData.BillingContext = &model.TaskBillingContext{
+ 			ModelPrice:      relayInfo.PriceData.ModelPrice,
+diff --git a/controller/task.go b/controller/task.go
+index eac7db153..bfaffb8ee 100644
+--- a/controller/task.go
++++ b/controller/task.go
+@@ -66,6 +66,35 @@ func GetUserTask(c *gin.Context) {
+ 	common.ApiSuccess(c, pageInfo)
+ }
+ 
++func GetUserTokenTask(c *gin.Context) {
++	pageInfo := common.GetPageQuery(c)
++
++	userId := c.GetInt("id")
++	tokenId := c.GetInt("token_id")
++	if err := model.SyncLegacyTaskTokenIDsForUser(userId); err != nil {
++		common.ApiError(c, err)
++		return
++	}
++
++	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
++	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
++
++	queryParams := model.SyncTaskQueryParams{
++		Platform:       constant.TaskPlatform(c.Query("platform")),
++		TaskID:         c.Query("task_id"),
++		Status:         c.Query("status"),
++		Action:         c.Query("action"),
++		StartTimestamp: startTimestamp,
++		EndTimestamp:   endTimestamp,
++	}
++
++	items := model.TaskGetAllUserTokenTask(userId, tokenId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
++	total := model.TaskCountAllUserTokenTask(userId, tokenId, queryParams)
++	pageInfo.SetTotal(int(total))
++	pageInfo.SetItems(tasksToDto(items, false))
++	common.ApiSuccess(c, pageInfo)
++}
++
+ func tasksToDto(tasks []*model.Task, fillUser bool) []*dto.TaskDto {
+ 	var userIdMap map[int]*model.UserBase
+ 	if fillUser {
+diff --git a/controller/user_token_redeem_test.go b/controller/user_token_redeem_test.go
+index 5eacd0fb0..b7441ab21 100644
+--- a/controller/user_token_redeem_test.go
++++ b/controller/user_token_redeem_test.go
+@@ -2,6 +2,7 @@ package controller_test
+ 
+ import (
+ 	"bytes"
++	"fmt"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"os"
+@@ -59,11 +60,12 @@ func seedRedeemUser(t *testing.T, id int, quota int) {
+ 	t.Helper()
+ 	user := &model.User{
+ 		Id:       id,
+-		Username: "redeem_user",
++		Username: fmt.Sprintf("redeem_user_%d", id),
+ 		Password: "password123",
+ 		Quota:    quota,
+ 		Status:   common.UserStatusEnabled,
+ 		Group:    "default",
++		AffCode:  fmt.Sprintf("AFF%04d", id),
+ 	}
+ 	require.NoError(t, model.DB.Create(user).Error)
+ }
+diff --git a/model/task.go b/model/task.go
+index 2fbd3fd66..e53979b75 100644
+--- a/model/task.go
++++ b/model/task.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/dto"
+ 	commonRelay "github.com/QuantumNous/new-api/relay/common"
++	"gorm.io/gorm"
+ )
+ 
+ type TaskStatus string
+@@ -48,7 +49,8 @@ type Task struct {
+ 	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
+ 	Platform   constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
+ 	UserId     int                   `json:"user_id" gorm:"index"`
+-	Group      string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
++	TokenId    int                   `json:"token_id" gorm:"index;default:0"` // 任务创建时绑定的 token id
++	Group      string                `json:"group" gorm:"type:varchar(50)"`   // 修正计费用
+ 	ChannelId  int                   `json:"channel_id" gorm:"index"`
+ 	Quota      int                   `json:"quota"`
+ 	Action     string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
+@@ -135,6 +137,15 @@ func (t *Task) GetResultURL() string {
+ 	return t.FailReason
+ }
+ 
++// GetEffectiveTokenID 返回任务实际绑定的 token id。
++// 新数据优先使用独立列；老数据回退到 private_data 中的历史值。
++func (t *Task) GetEffectiveTokenID() int {
++	if t.TokenId > 0 {
++		return t.TokenId
++	}
++	return t.PrivateData.TokenId
++}
++
+ // GenerateTaskID 生成对外暴露的 task_xxxx 格式 ID
+ func GenerateTaskID() string {
+ 	key, _ := common.GenerateRandomCharsKey(32)
+@@ -213,27 +224,7 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
+ 	var err error
+ 
+ 	// 初始化查询构建器
+-	query := DB.Where("user_id = ?", userId)
+-
+-	if queryParams.TaskID != "" {
+-		query = query.Where("task_id = ?", queryParams.TaskID)
+-	}
+-	if queryParams.Action != "" {
+-		query = query.Where("action = ?", queryParams.Action)
+-	}
+-	if queryParams.Status != "" {
+-		query = query.Where("status = ?", queryParams.Status)
+-	}
+-	if queryParams.Platform != "" {
+-		query = query.Where("platform = ?", queryParams.Platform)
+-	}
+-	if queryParams.StartTimestamp != 0 {
+-		// 假设您已将前端传来的时间戳转换为数据库所需的时间格式，并处理了时间戳的验证和解析
+-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
+-	}
+-	if queryParams.EndTimestamp != 0 {
+-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
+-	}
++	query := applyTaskQueryFilters(DB.Where("user_id = ?", userId), queryParams)
+ 
+ 	// 获取数据
+ 	err = query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
+@@ -249,36 +240,7 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
+ 	var err error
+ 
+ 	// 初始化查询构建器
+-	query := DB
+-
+-	// 添加过滤条件
+-	if queryParams.ChannelID != "" {
+-		query = query.Where("channel_id = ?", queryParams.ChannelID)
+-	}
+-	if queryParams.Platform != "" {
+-		query = query.Where("platform = ?", queryParams.Platform)
+-	}
+-	if queryParams.UserID != "" {
+-		query = query.Where("user_id = ?", queryParams.UserID)
+-	}
+-	if len(queryParams.UserIDs) != 0 {
+-		query = query.Where("user_id in (?)", queryParams.UserIDs)
+-	}
+-	if queryParams.TaskID != "" {
+-		query = query.Where("task_id = ?", queryParams.TaskID)
+-	}
+-	if queryParams.Action != "" {
+-		query = query.Where("action = ?", queryParams.Action)
+-	}
+-	if queryParams.Status != "" {
+-		query = query.Where("status = ?", queryParams.Status)
+-	}
+-	if queryParams.StartTimestamp != 0 {
+-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
+-	}
+-	if queryParams.EndTimestamp != 0 {
+-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
+-	}
++	query := applyTaskQueryFilters(DB, queryParams)
+ 
+ 	// 获取数据
+ 	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
+@@ -438,7 +400,62 @@ type TaskQuotaUsage struct {
+ // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
+ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
+ 	var total int64
+-	query := DB.Model(&Task{})
++	query := applyTaskQueryFilters(DB.Model(&Task{}), queryParams)
++	_ = query.Count(&total).Error
++	return total
++}
++
++// TaskCountAllUserTask returns total tasks for given user
++func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
++	var total int64
++	query := applyTaskQueryFilters(DB.Model(&Task{}).Where("user_id = ?", userId), queryParams)
++	_ = query.Count(&total).Error
++	return total
++}
++
++func TaskCountAllUserTokenTask(userId int, tokenId int, queryParams SyncTaskQueryParams) int64 {
++	var total int64
++	query := applyTaskQueryFilters(DB.Model(&Task{}).Where("user_id = ? AND token_id = ?", userId, tokenId), queryParams)
++	_ = query.Count(&total).Error
++	return total
++}
++
++func TaskGetAllUserTokenTask(userId int, tokenId int, startIdx int, num int, queryParams SyncTaskQueryParams) []*Task {
++	var tasks []*Task
++	query := applyTaskQueryFilters(DB.Where("user_id = ? AND token_id = ?", userId, tokenId), queryParams)
++	if err := query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error; err != nil {
++		return nil
++	}
++	return tasks
++}
++
++// SyncLegacyTaskTokenIDsForUser 将历史任务里只存在于 private_data 的 token_id 回填到独立列。
++func SyncLegacyTaskTokenIDsForUser(userId int) error {
++	var legacyTasks []*Task
++	if err := DB.Select("id", "token_id", "private_data").
++		Where("user_id = ? AND (token_id = 0 OR token_id IS NULL)", userId).
++		Find(&legacyTasks).Error; err != nil {
++		return err
++	}
++
++	taskIDsByToken := make(map[int][]int64)
++	for _, task := range legacyTasks {
++		tokenId := task.GetEffectiveTokenID()
++		if tokenId <= 0 {
++			continue
++		}
++		taskIDsByToken[tokenId] = append(taskIDsByToken[tokenId], task.ID)
++	}
++
++	for tokenId, ids := range taskIDsByToken {
++		if err := DB.Model(&Task{}).Where("id in (?)", ids).Update("token_id", tokenId).Error; err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func applyTaskQueryFilters(query *gorm.DB, queryParams SyncTaskQueryParams) *gorm.DB {
+ 	if queryParams.ChannelID != "" {
+ 		query = query.Where("channel_id = ?", queryParams.ChannelID)
+ 	}
+@@ -466,34 +483,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
+ 	if queryParams.EndTimestamp != 0 {
+ 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
+ 	}
+-	_ = query.Count(&total).Error
+-	return total
+-}
+-
+-// TaskCountAllUserTask returns total tasks for given user
+-func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
+-	var total int64
+-	query := DB.Model(&Task{}).Where("user_id = ?", userId)
+-	if queryParams.TaskID != "" {
+-		query = query.Where("task_id = ?", queryParams.TaskID)
+-	}
+-	if queryParams.Action != "" {
+-		query = query.Where("action = ?", queryParams.Action)
+-	}
+-	if queryParams.Status != "" {
+-		query = query.Where("status = ?", queryParams.Status)
+-	}
+-	if queryParams.Platform != "" {
+-		query = query.Where("platform = ?", queryParams.Platform)
+-	}
+-	if queryParams.StartTimestamp != 0 {
+-		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
+-	}
+-	if queryParams.EndTimestamp != 0 {
+-		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
+-	}
+-	_ = query.Count(&total).Error
+-	return total
++	return query
+ }
+ func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
+ 	openAIVideo := dto.NewOpenAIVideo()
+diff --git a/router/api-router.go b/router/api-router.go
+index 3c36d0020..3a4b35461 100644
+--- a/router/api-router.go
++++ b/router/api-router.go
+@@ -325,6 +325,7 @@ func SetApiRouter(router *gin.Engine) {
+ 		taskRoute := apiRouter.Group("/task")
+ 		{
+ 			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)
++			taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
+ 			taskRoute.GET("/", middleware.AdminAuth(), controller.GetAllTask)
+ 		}
+ 
+diff --git a/controller/task_token_test.go b/controller/task_token_test.go
+new file mode 100644
+index 000000000..a6fc88790
+--- /dev/null
++++ b/controller/task_token_test.go
+@@ -0,0 +1,149 @@
++package controller_test
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/controller"
++	"github.com/QuantumNous/new-api/middleware"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++type taskPageResponse struct {
++	Total int                `json:"total"`
++	Items []taskResponseItem `json:"items"`
++}
++
++type taskResponseItem struct {
++	TaskID string `json:"task_id"`
++	Status string `json:"status"`
++}
++
++func makeTokenTaskRouter() *gin.Engine {
++	router := gin.New()
++	router.GET("/api/task/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
++	return router
++}
++
++func performTokenTaskRequest(t *testing.T, router *gin.Engine, auth string, rawQuery string) *httptest.ResponseRecorder {
++	t.Helper()
++
++	target := "/api/task/token/self"
++	if rawQuery != "" {
++		target += "?" + rawQuery
++	}
++	req := httptest.NewRequest(http.MethodGet, target, nil)
++	req.Header.Set("Accept-Language", "zh-CN")
++	if auth != "" {
++		req.Header.Set("Authorization", auth)
++	}
++
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, req)
++	return w
++}
++
++func seedAsyncTask(t *testing.T, taskID string, userID int, legacyTokenID int, status model.TaskStatus, submitTime int64) {
++	t.Helper()
++
++	task := &model.Task{
++		TaskID:     taskID,
++		UserId:     userID,
++		Platform:   constant.TaskPlatform("openai"),
++		Action:     "generate",
++		Status:     status,
++		Progress:   "100%",
++		SubmitTime: submitTime,
++		Properties: model.Properties{
++			OriginModelName: "sora-2",
++		},
++		PrivateData: model.TaskPrivateData{
++			TokenId: legacyTokenID,
++		},
++	}
++	require.NoError(t, model.DB.Create(task).Error)
++}
++
++func decodeTaskPageResponse(t *testing.T, body []byte) taskPageResponse {
++	t.Helper()
++
++	var resp struct {
++		Success bool             `json:"success"`
++		Message string           `json:"message"`
++		Data    taskPageResponse `json:"data"`
++	}
++	require.NoError(t, common.Unmarshal(body, &resp))
++	require.True(t, resp.Success, "unexpected error: %s", resp.Message)
++	return resp.Data
++}
++
++func getTaskTokenIDForTest(t *testing.T, taskID string) int {
++	t.Helper()
++
++	var task model.Task
++	require.NoError(t, model.DB.Select("token_id").Where("task_id = ?", taskID).First(&task).Error)
++	return task.TokenId
++}
++
++func TestGetUserTokenTask_ListOnlyCurrentTokenTasks(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 21
++	const otherUserID = 22
++	const tokenID = 2101
++	const otherTokenID = 2102
++	const tokenKey = "tasktoken2101"
++
++	seedRedeemUser(t, userID, 0)
++	seedRedeemUser(t, otherUserID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++	seedRedeemToken(t, otherTokenID, userID, "tasktoken2102", 1000, 0)
++
++	// 模拟补丁上线前的老数据：只有 private_data.token_id，没有独立 token_id 列。
++	seedAsyncTask(t, "task-token-match-1", userID, tokenID, model.TaskStatusSuccess, 100)
++	seedAsyncTask(t, "task-token-other", userID, otherTokenID, model.TaskStatusSuccess, 200)
++	seedAsyncTask(t, "task-token-match-2", userID, tokenID, model.TaskStatusInProgress, 300)
++	seedAsyncTask(t, "task-other-user", otherUserID, tokenID, model.TaskStatusSuccess, 400)
++
++	w := performTokenTaskRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, "p=1&page_size=10")
++
++	require.Equal(t, http.StatusOK, w.Code)
++	page := decodeTaskPageResponse(t, w.Body.Bytes())
++	require.Equal(t, 2, page.Total)
++	require.Len(t, page.Items, 2)
++	assert.Equal(t, "task-token-match-2", page.Items[0].TaskID)
++	assert.Equal(t, string(model.TaskStatusInProgress), page.Items[0].Status)
++	assert.Equal(t, "task-token-match-1", page.Items[1].TaskID)
++	assert.Equal(t, string(model.TaskStatusSuccess), page.Items[1].Status)
++	assert.Equal(t, tokenID, getTaskTokenIDForTest(t, "task-token-match-1"))
++	assert.Equal(t, tokenID, getTaskTokenIDForTest(t, "task-token-match-2"))
++	assert.Equal(t, otherTokenID, getTaskTokenIDForTest(t, "task-token-other"))
++}
++
++func TestGetUserTokenTask_SupportsTaskIDFilter(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 31
++	const tokenID = 3101
++	const tokenKey = "tasktoken3101"
++
++	seedRedeemUser(t, userID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++	seedAsyncTask(t, "task-filter-hit", userID, tokenID, model.TaskStatusSuccess, 100)
++	seedAsyncTask(t, "task-filter-miss", userID, tokenID, model.TaskStatusFailure, 200)
++
++	w := performTokenTaskRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, "p=1&page_size=10&task_id=task-filter-hit")
++
++	require.Equal(t, http.StatusOK, w.Code)
++	page := decodeTaskPageResponse(t, w.Body.Bytes())
++	require.Equal(t, 1, page.Total)
++	require.Len(t, page.Items, 1)
++	assert.Equal(t, "task-filter-hit", page.Items[0].TaskID)
++	assert.Equal(t, string(model.TaskStatusSuccess), page.Items[0].Status)
++}

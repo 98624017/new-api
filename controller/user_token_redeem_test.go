@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,11 +60,12 @@ func seedRedeemUser(t *testing.T, id int, quota int) {
 	t.Helper()
 	user := &model.User{
 		Id:       id,
-		Username: "redeem_user",
+		Username: fmt.Sprintf("redeem_user_%d", id),
 		Password: "password123",
 		Quota:    quota,
 		Status:   common.UserStatusEnabled,
 		Group:    "default",
+		AffCode:  fmt.Sprintf("AFF%04d", id),
 	}
 	require.NoError(t, model.DB.Create(user).Error)
 }

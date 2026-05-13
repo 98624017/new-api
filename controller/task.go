@@ -66,6 +66,35 @@ func GetUserTask(c *gin.Context) {
 	common.ApiSuccess(c, pageInfo)
 }
 
+func GetUserTokenTask(c *gin.Context) {
+	pageInfo := common.GetPageQuery(c)
+
+	userId := c.GetInt("id")
+	tokenId := c.GetInt("token_id")
+	if err := model.SyncLegacyTaskTokenIDsForUser(userId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+
+	queryParams := model.SyncTaskQueryParams{
+		Platform:       constant.TaskPlatform(c.Query("platform")),
+		TaskID:         c.Query("task_id"),
+		Status:         c.Query("status"),
+		Action:         c.Query("action"),
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+	}
+
+	items := model.TaskGetAllUserTokenTask(userId, tokenId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
+	total := model.TaskCountAllUserTokenTask(userId, tokenId, queryParams)
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(tasksToDto(items, false))
+	common.ApiSuccess(c, pageInfo)
+}
+
 func tasksToDto(tasks []*model.Task, fillUser bool) []*dto.TaskDto {
 	var userIdMap map[int]*model.UserBase
 	if fillUser {

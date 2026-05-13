@@ -334,6 +334,68 @@ go test ./relay/common
 
 ---
 
+## 005-task-list-via-apikey.patch
+
+**功能**：通过 API Key (`Bearer sk-xxx`) 免登录查询“当前 key 创建的异步任务列表 / task_id”。
+
+**背景**：现有项目已经支持用 API Key 查询单个异步视频任务状态，但如果客户端没有保存提交时返回的 `task_id`，就无法只靠 API Key 找回“这个 key 创建过哪些任务”。本补丁新增一个只读列表接口，供外部控制台、轮询工具或 API Key 二次分发场景使用。
+
+**涉及文件（6 个）**：
+
+### 1. `router/api-router.go`
+
+在 `taskRoute` 下新增一条只读接口：
+
+```go
+taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
+```
+
+### 2. `controller/task.go`
+
+新增 `GetUserTokenTask`：
+
+- 从 `TokenAuthReadOnly()` 上下文中读取 `id` 和 `token_id`
+- 复用现有分页参数和任务筛选参数
+- 返回结构与 `/api/task/self` 保持一致
+
+### 3. `model/task.go`
+
+任务表新增独立 `token_id` 列，并新增按 token 维度查任务的方法：
+
+- `TaskGetAllUserTokenTask`
+- `TaskCountAllUserTokenTask`
+
+同时增加兼容逻辑：
+
+- 新任务优先使用独立 `token_id`
+- 老任务若独立列为空或为 `0`，首次查询时按用户批量回填 `private_data.token_id`
+- 回填完成后，列表与总数查询都只走独立 `token_id` 列，保持数据库分页
+
+### 4. `controller/relay.go`
+
+异步任务提交成功后，除了继续写 `private_data.token_id`，还同步写入任务表独立 `token_id` 列，保证新任务后续能走索引列查询。
+
+### 5. `controller/task_token_test.go`
+
+补充控制器回归测试，重点验证：
+
+- `Bearer sk-xxx` 可直接访问新接口
+- 仅返回当前 token 创建的任务
+- 老任务仅有 `private_data.token_id` 时也能命中
+- `task_id` 过滤参数仍然生效
+
+### 6. `controller/user_token_redeem_test.go`
+
+调整测试 helper，确保多用户测试场景下 `users.username` / `users.aff_code` 不会撞唯一索引。
+
+### 回归验证
+
+```bash
+go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
