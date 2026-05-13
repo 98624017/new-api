@@ -154,9 +154,9 @@ func (e *NewAPIError) MaskSensitiveError() string {
 	}
 	errStr := e.Err.Error()
 	if e.errorCode == ErrorCodeCountTokenFailed {
-		return errStr
+		return common.MaskBillingAmountsForClient(errStr)
 	}
-	return common.MaskSensitiveInfo(errStr)
+	return common.MaskBillingAmountsForClient(common.MaskSensitiveInfo(errStr))
 }
 
 func (e *NewAPIError) MaskSensitiveErrorWithStatusCode() string {

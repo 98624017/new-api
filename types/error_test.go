@@ -49,3 +49,24 @@ func TestNewAPIErrorToClaudeErrorMasksBillingAmounts(t *testing.T) {
 		t.Fatalf("expected masked quota labels to remain readable, got %q", claudeError.Message)
 	}
 }
+
+func TestNewAPIErrorMaskSensitiveErrorWithStatusCodeMasksBillingAmounts(t *testing.T) {
+	t.Parallel()
+
+	err := NewErrorWithStatusCode(
+		errors.New("预扣费额度失败, 用户剩余额度: ＄0.053570, 需要预扣费额度: ＄0.060000"),
+		ErrorCodeInsufficientUserQuota,
+		http.StatusForbidden,
+	)
+
+	msg := err.MaskSensitiveErrorWithStatusCode()
+
+	if strings.Contains(msg, "0.053570") || strings.Contains(msg, "0.060000") {
+		t.Fatalf("expected billing amounts to be masked in status-code error, got %q", msg)
+	}
+	if !strings.Contains(msg, "status_code=403") ||
+		!strings.Contains(msg, "用户剩余额度: ＄***") ||
+		!strings.Contains(msg, "需要预扣费额度: ＄***") {
+		t.Fatalf("expected status code and masked quota labels to remain readable, got %q", msg)
+	}
+}

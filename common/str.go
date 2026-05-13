@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/samber/lo"
@@ -18,8 +19,9 @@ var (
 	maskIPPattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
 	maskApiKeyPattern                = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
-	maskBillingCurrencyAmountPattern = regexp.MustCompile(`([¥￥$€£])\s*-?\d+(,\d{3})*(\.\d+)?`)
-	maskBillingLabelAmountPattern    = regexp.MustCompile(`(?i)((用户剩余额度|剩余额度|需要预扣费额度|预扣费额度|令牌剩余额度|token remain quota|remain quota|remaining quota|user quota|need quota|required quota|available quota|balance|credit|quota|amount|cost|price|need)\s*[:：=]\s*)([¥￥$€£]\s*)?-?\d+(,\d{3})*(\.\d+)?`)
+	maskBillingCurrencyAmountPattern = regexp.MustCompile(`(\p{Sc})\s*-?\d+(,\d{3})*(\.\d+)?`)
+	maskBillingLabelPrefixPattern    = regexp.MustCompile(`(?i)(用户剩余额度|剩余额度|需要预扣费额度|预扣费额度|令牌剩余额度|token remain quota|remain quota|remaining quota|user quota|need quota|required quota|available quota|balance|credit|quota|amount|cost|price|need)\s*[:：=]\s*`)
+	maskBillingNumberPattern         = regexp.MustCompile(`-?\d+(?:,\d{3})*(?:\.\d+)?`)
 )
 
 func GetStringIfEmpty(str string, defaultValue string) string {
@@ -259,6 +261,112 @@ func MaskSensitiveInfo(str string) string {
 // keeping the surrounding error text readable for downstream clients.
 func MaskBillingAmountsForClient(str string) string {
 	str = maskBillingCurrencyAmountPattern.ReplaceAllString(str, "${1}***")
-	str = maskBillingLabelAmountPattern.ReplaceAllString(str, "${1}${3}***")
-	return str
+	return maskBillingLabelAmounts(str)
+}
+
+func maskBillingLabelAmounts(str string) string {
+	matches := maskBillingLabelPrefixPattern.FindAllStringIndex(str, -1)
+	if len(matches) == 0 {
+		return str
+	}
+
+	var builder strings.Builder
+	last := 0
+	for i, match := range matches {
+		start, end := match[0], match[1]
+		if start < last {
+			continue
+		}
+
+		segmentEnd := findBillingSegmentEnd(str, end, len(str))
+		if i+1 < len(matches) && matches[i+1][0] < segmentEnd {
+			segmentEnd = matches[i+1][0]
+		}
+
+		builder.WriteString(str[last:start])
+		builder.WriteString(str[start:end])
+		builder.WriteString(maskLastBillingAmount(str[end:segmentEnd]))
+		last = segmentEnd
+	}
+	builder.WriteString(str[last:])
+	return builder.String()
+}
+
+func maskLastBillingAmount(segment string) string {
+	matches := maskBillingNumberPattern.FindAllStringIndex(segment, -1)
+	if len(matches) == 0 {
+		return segment
+	}
+
+	for i := len(matches) - 1; i >= 0; i-- {
+		start, end := matches[i][0], matches[i][1]
+		if hasBillingMetadataPrefix(segment[:start]) {
+			continue
+		}
+		if start > 0 {
+			prev := segment[start-1]
+			if (prev >= '0' && prev <= '9') || (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || prev == '_' {
+				continue
+			}
+		}
+		if end < len(segment) {
+			next := segment[end]
+			if (next >= '0' && next <= '9') || (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || next == '_' {
+				continue
+			}
+		}
+		return segment[:start] + "***" + segment[end:]
+	}
+
+	return segment
+}
+
+func hasBillingMetadataPrefix(prefix string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(prefix))
+	if trimmed == "" {
+		return false
+	}
+	for _, suffix := range []string{
+		"request id",
+		"request_id",
+		"request-id",
+		"status code",
+		"status_code",
+		"status-code",
+		"status_code=",
+		"status-code=",
+		"retry",
+		"retry=",
+		"retries",
+		"retries=",
+		"attempt",
+		"attempt=",
+		"attempts",
+		"attempts=",
+	} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func findBillingSegmentEnd(str string, start int, limit int) int {
+	for i := start; i < limit; {
+		r, size := utf8.DecodeRuneInString(str[i:limit])
+		switch r {
+		case ',', '，', ';', '；', '\n', '\r':
+			if r == ',' && i > start && i+1 < limit {
+				prev := str[i-1]
+				next := str[i+1]
+				if prev >= '0' && prev <= '9' && next >= '0' && next <= '9' {
+					i += size
+					continue
+				}
+			}
+			return i
+		}
+		i += size
+	}
+	return limit
 }

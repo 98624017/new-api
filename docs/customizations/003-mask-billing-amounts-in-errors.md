@@ -26,27 +26,29 @@
 
 ## 3. 业务规则
 
-- `¥0.056700`、`$0.069900` 等货币金额展示为 `¥***`、`$***`
+- `¥0.056700`、`＄0.060000` 等 Unicode 货币符号金额展示为 `¥***`、`＄***`
 - `token remain quota: 120`、`need quota: 300` 等额度标签后的裸数字展示为 `***`
+- `balance: credits 12.50`、`balance: (estimated) 12.50`、`balance: tier 2 credits 12.50` 等额度标签后的自定义单位 / 前缀也展示为 `***`
+- 若金额后面还跟着 `request id 123`、`retry 2`、`status_code=403` 这类元数据数字，只脱敏前面的金额，不误伤后面的元数据数字
 - `need=69900` 这类上游或订阅额度不足文案展示为 `need=***`
 - `status_code=403`、`request id req_123` 等非计费字段不脱敏
-- 内部原始 error 对象不改写，只在面向客户端的 message 上脱敏
+- 内部原始 error 对象不改写，只在面向客户端的 message 和错误日志展示文本上脱敏
 
 ## 4. 影响范围
 
 - `common/str.go`
-  - 新增客户端计费金额脱敏函数
+  - 新增客户端计费金额脱敏函数，优先按计费标签脱敏，货币符号仅作为无标签场景的保守兜底
 - `types/error.go`
-  - OpenAI / Claude 风格错误响应增加金额脱敏
+  - OpenAI / Claude 风格错误响应、错误日志展示文本增加金额脱敏
 - `service/error.go`
   - 异步任务错误响应增加金额脱敏
 - 测试文件
-  - 覆盖中文预扣费文案、英文额度文案、订阅 `need=` 文案
+  - 覆盖中文预扣费文案、全角美元符号、自定义单位前缀、金额后带数字型元数据、英文额度文案、订阅 `need=` 文案
 
 ## 5. 风险点
 
 - 如果上游后续使用新的金额格式，可能需要扩展正则
-- 当前策略会脱敏带常见货币符号的金额，以及常见计费标签后的数字
+- 当前策略会脱敏 Unicode 货币符号金额，以及常见计费标签后的数字 / 自定义单位前缀后的数字，前缀里出现括号或数字也能继续命中
 - 为避免误伤，未做“所有数字”全局脱敏
 
 ## 6. 测试方案
@@ -55,7 +57,7 @@
 
 ```bash
 go test ./common -run TestMaskBillingAmountsForClient -count=1
-go test ./types -run TestNewAPIErrorTo -count=1
+go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -count=1
 ```
 

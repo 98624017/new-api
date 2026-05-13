@@ -243,15 +243,20 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 ### 1. `common/str.go`
 
-新增 `MaskBillingAmountsForClient`，只脱敏常见计费金额和额度标签后的数字：
+新增 `MaskBillingAmountsForClient`，优先按计费语义标签脱敏，货币符号只作为无标签场景的保守兜底：
 
 - `¥0.056700` -> `¥***`
+- `＄0.060000` -> `＄***`
 - `token remain quota: 120` -> `token remain quota: ***`
+- `balance: credits 12.50` -> `balance: credits ***`
+- `balance: (estimated) 12.50` -> `balance: (estimated) ***`
+- `balance: tier 2 credits 12.50` -> `balance: tier 2 credits ***`
+- `balance: credits 12.50 request id 123` -> `balance: credits *** request id 123`
 - `need=69900` -> `need=***`
 
 ### 2. `types/error.go`
 
-在 `ToOpenAIError` / `ToClaudeError` 中调用金额脱敏，覆盖同步 relay 的 OpenAI / Claude 风格错误响应。
+在 `ToOpenAIError` / `ToClaudeError` / `MaskSensitiveError` 中调用金额脱敏，覆盖同步 relay 的 OpenAI / Claude 风格错误响应和错误日志展示文本。
 
 ### 3. `service/error.go`
 
@@ -259,11 +264,11 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 ### 4. `common/billing_amount_mask_test.go`
 
-覆盖中文预扣费金额、英文额度标签、订阅 `need=` 文案，以及 `status_code` / `request id` 不被误伤。
+覆盖中文预扣费金额、全角美元符号、自定义单位前缀、金额后带数字型元数据、英文额度标签、订阅 `need=` 文案，以及 `status_code` / `request id` 不被误伤。
 
 ### 5. `types/error_test.go`
 
-覆盖 OpenAI / Claude 错误转换中的金额脱敏。
+覆盖 OpenAI / Claude 错误转换和错误日志展示文本中的金额脱敏。
 
 ### 6. `service/error_test.go`
 
@@ -273,7 +278,7 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 ```bash
 go test ./common -run TestMaskBillingAmountsForClient -count=1
-go test ./types -run TestNewAPIErrorTo -count=1
+go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -count=1
 ```
 
