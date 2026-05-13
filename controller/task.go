@@ -71,10 +71,6 @@ func GetUserTokenTask(c *gin.Context) {
 
 	userId := c.GetInt("id")
 	tokenId := c.GetInt("token_id")
-	if err := model.SyncLegacyTaskTokenIDsForUser(userId); err != nil {
-		common.ApiError(c, err)
-		return
-	}
 
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)

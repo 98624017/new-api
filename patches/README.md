@@ -364,12 +364,8 @@ taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserT
 
 - `TaskGetAllUserTokenTask`
 - `TaskCountAllUserTokenTask`
-
-同时增加兼容逻辑：
-
-- 新任务优先使用独立 `token_id`
-- 老任务若独立列为空或为 `0`，首次查询时按用户批量回填 `private_data.token_id`
-- 回填完成后，列表与总数查询都只走独立 `token_id` 列，保持数据库分页
+- 列表与总数查询直接走独立 `token_id` 列
+- 不为历史任务做懒回填，补丁上线前未写入该列的任务默认查不到
 
 ### 4. `controller/relay.go`
 
@@ -381,7 +377,6 @@ taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserT
 
 - `Bearer sk-xxx` 可直接访问新接口
 - 仅返回当前 token 创建的任务
-- 老任务仅有 `private_data.token_id` 时也能命中
 - `task_id` 过滤参数仍然生效
 
 ### 6. `controller/user_token_redeem_test.go`

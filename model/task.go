@@ -137,15 +137,6 @@ func (t *Task) GetResultURL() string {
 	return t.FailReason
 }
 
-// GetEffectiveTokenID 返回任务实际绑定的 token id。
-// 新数据优先使用独立列；老数据回退到 private_data 中的历史值。
-func (t *Task) GetEffectiveTokenID() int {
-	if t.TokenId > 0 {
-		return t.TokenId
-	}
-	return t.PrivateData.TokenId
-}
-
 // GenerateTaskID 生成对外暴露的 task_xxxx 格式 ID
 func GenerateTaskID() string {
 	key, _ := common.GenerateRandomCharsKey(32)
@@ -427,32 +418,6 @@ func TaskGetAllUserTokenTask(userId int, tokenId int, startIdx int, num int, que
 		return nil
 	}
 	return tasks
-}
-
-// SyncLegacyTaskTokenIDsForUser 将历史任务里只存在于 private_data 的 token_id 回填到独立列。
-func SyncLegacyTaskTokenIDsForUser(userId int) error {
-	var legacyTasks []*Task
-	if err := DB.Select("id", "token_id", "private_data").
-		Where("user_id = ? AND (token_id = 0 OR token_id IS NULL)", userId).
-		Find(&legacyTasks).Error; err != nil {
-		return err
-	}
-
-	taskIDsByToken := make(map[int][]int64)
-	for _, task := range legacyTasks {
-		tokenId := task.GetEffectiveTokenID()
-		if tokenId <= 0 {
-			continue
-		}
-		taskIDsByToken[tokenId] = append(taskIDsByToken[tokenId], task.ID)
-	}
-
-	for tokenId, ids := range taskIDsByToken {
-		if err := DB.Model(&Task{}).Where("id in (?)", ids).Update("token_id", tokenId).Error; err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func applyTaskQueryFilters(query *gorm.DB, queryParams SyncTaskQueryParams) *gorm.DB {

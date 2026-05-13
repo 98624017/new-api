@@ -51,7 +51,7 @@
 ### 005-task-list-via-apikey
 
 - 目标：允许通过 API Key (`Bearer sk-xxx`) 免登录查询“当前 key 创建的异步任务列表 / task_id”
-- 影响范围：任务列表接口、任务落库字段、老任务 token 兼容查询
+- 影响范围：任务列表接口、任务落库字段、新任务 token 维度查询
 - 当前状态：已实现，并已生成 `patches/005-task-list-via-apikey.patch`
 
 ## 上游同步标准流程

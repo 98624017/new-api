@@ -12,13 +12,13 @@
 - 新增一个支持 API Key 免登录的异步任务列表接口
 - 只返回“当前请求使用的 token/key 创建的任务”
 - 保持与现有 `/api/task/self` 一致的分页和筛选参数风格
-- 兼容历史任务：老数据即使只有 `private_data.token_id`，也要能查到
 
 不解决：
 
 - 不改动原有 `/api/task/self` 的 Session 登录模式
 - 不新增新的后台页面
 - 不开放跨用户、跨 token 的任务检索能力
+- 不为补丁上线前的历史任务补做 `token_id` 兼容回填
 
 ## 3. 业务规则
 
@@ -31,13 +31,11 @@
   - `status`
   - `action`
   - `platform`
-  - `start_timestamp`
-  - `end_timestamp`
+- `start_timestamp`
+- `end_timestamp`
 - 只返回当前 token 创建的任务，不返回同一用户其他 token 创建的任务
-- 对于补丁上线前创建的老任务：
-  - 若任务表独立 `token_id` 列为空或为 `0`
-  - 则在首次查询时按用户批量回填 `private_data.token_id -> token_id`
-  - 回填完成后，列表与总数查询都只走独立 `token_id` 列，保持数据库分页
+- 列表与总数查询只基于任务表独立 `token_id` 列
+- 补丁上线前的历史任务如果没有写入独立 `token_id`，本接口默认查不到
 
 ## 4. 影响范围
 
@@ -48,7 +46,6 @@
 - `model/task.go`
   - 任务表新增独立 `token_id` 字段
   - 新增按 token 查询用户任务的方法
-  - 新增老任务 `private_data.token_id` 的批量回填逻辑
 - `controller/relay.go`
   - 新建异步任务时同步写入独立 `token_id`
 - `controller/task_token_test.go`
@@ -58,8 +55,8 @@
 
 ## 5. 风险点
 
-- 老任务首次按 token 查询时，会扫描当前用户的 `token_id=0` 任务做一次批量回填，历史数据很多时首查会比新数据慢
-- 若上游未来调整任务表结构或移除 `private_data.token_id`，兼容回退逻辑需要同步调整
+- 补丁上线前的历史任务若未写入独立 `token_id`，默认不会出现在新接口结果里
+- 若异步任务落库路径未来漏写 `tasks.token_id`，新任务也会被新接口漏查
 - 当前接口仍复用任务 DTO，不额外暴露 token 详情，若下游以后需要展示“来自哪个 key”，需要另行扩展响应结构
 
 ## 6. 测试方案
@@ -89,6 +86,5 @@ make verify-patches
 
 - 已实现 `GET /api/task/token/self`
 - 已实现“当前 token 任务列表”分页查询
-- 已实现首次查询时按用户批量回填 legacy `token_id`
 - 已补充控制器测试
 - 已生成 `patches/005-task-list-via-apikey.patch`

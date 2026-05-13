@@ -49,12 +49,13 @@ func performTokenTaskRequest(t *testing.T, router *gin.Engine, auth string, rawQ
 	return w
 }
 
-func seedAsyncTask(t *testing.T, taskID string, userID int, legacyTokenID int, status model.TaskStatus, submitTime int64) {
+func seedAsyncTask(t *testing.T, taskID string, userID int, tokenID int, status model.TaskStatus, submitTime int64) {
 	t.Helper()
 
 	task := &model.Task{
 		TaskID:     taskID,
 		UserId:     userID,
+		TokenId:    tokenID,
 		Platform:   constant.TaskPlatform("openai"),
 		Action:     "generate",
 		Status:     status,
@@ -64,7 +65,7 @@ func seedAsyncTask(t *testing.T, taskID string, userID int, legacyTokenID int, s
 			OriginModelName: "sora-2",
 		},
 		PrivateData: model.TaskPrivateData{
-			TokenId: legacyTokenID,
+			TokenId: tokenID,
 		},
 	}
 	require.NoError(t, model.DB.Create(task).Error)
@@ -105,7 +106,6 @@ func TestGetUserTokenTask_ListOnlyCurrentTokenTasks(t *testing.T) {
 	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
 	seedRedeemToken(t, otherTokenID, userID, "tasktoken2102", 1000, 0)
 
-	// 模拟补丁上线前的老数据：只有 private_data.token_id，没有独立 token_id 列。
 	seedAsyncTask(t, "task-token-match-1", userID, tokenID, model.TaskStatusSuccess, 100)
 	seedAsyncTask(t, "task-token-other", userID, otherTokenID, model.TaskStatusSuccess, 200)
 	seedAsyncTask(t, "task-token-match-2", userID, tokenID, model.TaskStatusInProgress, 300)
