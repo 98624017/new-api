@@ -29,5 +29,6 @@ data/
 .gomodcache/
 .gocache-temp
 .gopath
+graphify-out/
 
 token_estimator_test.go
