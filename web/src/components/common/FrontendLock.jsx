@@ -117,7 +117,7 @@ const FrontendLock = ({ onUnlock }) => {
                 访问已锁定
               </Title>
               <Text type='tertiary'>
-                请输入访问密码继续进入站点。API 调用不受此页面影响。
+                请输入访问密码继续访问内部项目服务。本服务不对外提供访问。
               </Text>
             </div>
 

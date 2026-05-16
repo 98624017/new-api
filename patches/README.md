@@ -347,7 +347,7 @@ go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -
 
 **功能**：前端弱隐藏锁屏。设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问前端页面需要先输入密码。
 
-**背景**：公开 API 域名有时会同时暴露前端入口。本补丁用于降低普通访客直接看到管理页面入口的概率，但不提供真正安全隔离。
+**背景**：内部服务域名有时会同时暴露前端入口。本补丁用于降低普通访客直接看到管理页面入口的概率，但不提供真正安全隔离。
 
 **涉及文件（8 个）**：
 
@@ -365,7 +365,7 @@ go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -
 
 ### 4. `web/src/helpers/frontendLock.js`
 
-封装密码读取、开关判断、会话解锁状态和密码校验逻辑。
+封装密码读取、开关判断、浏览器解锁缓存和密码校验逻辑。
 
 ### 5. `web/src/components/common/FrontendLock.jsx`
 
