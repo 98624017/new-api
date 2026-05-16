@@ -182,6 +182,7 @@ func main() {
 
 	InjectUmamiAnalytics()
 	InjectGoogleAnalytics()
+	InjectFrontendLockPassword()
 
 	// 设置路由
 	router.SetRouter(server, buildFS, indexPage)
@@ -238,6 +239,27 @@ func InjectGoogleAnalytics() {
 	analyticsInjectBuilder.WriteString("<!--Google Analytics QuantumNous-->\n")
 	analyticsInject := analyticsInjectBuilder.String()
 	indexPage = bytes.ReplaceAll(indexPage, []byte("<!--Google Analytics-->\n"), []byte(analyticsInject))
+}
+
+func InjectFrontendLockPassword() {
+	password := os.Getenv("FRONTEND_LOCK_PASSWORD")
+	if password == "" {
+		return
+	}
+
+	passwordJSON, err := common.Marshal(password)
+	if err != nil {
+		common.SysError(fmt.Sprintf("failed to encode frontend lock password: %v", err))
+		return
+	}
+
+	script := []byte("<script>window.__FRONTEND_LOCK_PASSWORD__=" + string(passwordJSON) + ";</script>\n")
+	headEnd := []byte("</head>")
+	if bytes.Contains(indexPage, headEnd) {
+		indexPage = bytes.Replace(indexPage, headEnd, append(script, headEnd...), 1)
+		return
+	}
+	indexPage = append(indexPage, script...)
 }
 
 func InitResources() error {

@@ -26,12 +26,17 @@ import 'react-toastify/dist/ReactToastify.css';
 import { StatusProvider } from './context/Status';
 import { ThemeProvider } from './context/Theme';
 import PageLayout from './components/layout/PageLayout';
+import FrontendLock from './components/common/FrontendLock';
 import './i18n/i18n';
 import './index.css';
 import { LocaleProvider } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import zh_CN from '@douyinfe/semi-ui/lib/es/locale/source/zh_CN';
 import en_GB from '@douyinfe/semi-ui/lib/es/locale/source/en_GB';
+import {
+  isFrontendLockEnabled,
+  isFrontendLockUnlocked,
+} from './helpers/frontendLock';
 
 // 欢迎信息（二次开发者未经允许不准将此移除）
 // Welcome message (Do not remove this without permission from the original developer)
@@ -52,6 +57,18 @@ function SemiLocaleWrapper({ children }) {
   return <LocaleProvider locale={semiLocale}>{children}</LocaleProvider>;
 }
 
+function FrontendLockGate() {
+  const [locked, setLocked] = React.useState(
+    () => isFrontendLockEnabled() && !isFrontendLockUnlocked(),
+  );
+
+  if (locked) {
+    return <FrontendLock onUnlock={() => setLocked(false)} />;
+  }
+
+  return <PageLayout />;
+}
+
 // initialization
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
@@ -67,7 +84,7 @@ root.render(
         >
           <ThemeProvider>
             <SemiLocaleWrapper>
-              <PageLayout />
+              <FrontendLockGate />
             </SemiLocaleWrapper>
           </ThemeProvider>
         </BrowserRouter>

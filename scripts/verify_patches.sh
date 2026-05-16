@@ -3,7 +3,8 @@ set -euo pipefail
 
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
-PATCH_BASE_REF="${PATCH_BASE_REF:-${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}}"
+PATCH_BASE_REF_DEFAULT="${PATCH_BASE_REF_DEFAULT:-22e509c1efb2260e1537c78684f1a5e9f053b75a}"
+PATCH_BASE_REF="${PATCH_BASE_REF:-${PATCH_BASE_REF_DEFAULT}}"
 ALLOW_UNPATCHED_CHANGES="${ALLOW_UNPATCHED_CHANGES:-0}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -70,7 +71,7 @@ if [[ "${#CHANGED_FILES[@]}" -gt 0 ]]; then
 fi
 
 if ! git rev-parse --verify "$PATCH_BASE_REF" >/dev/null 2>&1; then
-  fail "找不到 patch 基准引用: $PATCH_BASE_REF。请先执行 git fetch $UPSTREAM_REMOTE $UPSTREAM_BRANCH"
+  fail "找不到 patch 基准引用: $PATCH_BASE_REF。请确认当前仓库包含项目锁定的原版 new-api 基准，或显式设置 PATCH_BASE_REF"
 fi
 
 tmp_dir="$(mktemp -d /tmp/newapi-verify-patches-XXXXXX)"

@@ -23,20 +23,26 @@ make verify-patches
 
 - `patches/NNN-*.patch` 与 `docs/customizations/NNN-*.md` 是否一一对应
 - `patches/README.md` 与 `docs/customizations/README.md` 是否登记了对应二开
-- 所有 patch 是否能按编号顺序应用到 `upstream/main`
+- 所有 patch 是否能按编号顺序应用到当前项目锁定的原版 new-api 基准 `22e509c1efb2260e1537c78684f1a5e9f053b75a`
 - 当前工作区如果有源码改动，是否同步修改了至少一个 `patches/*.patch`
 
 ### 自动应用（推荐先尝试）
 
 ```bash
-# 同步上游代码后，逐个应用补丁
-git apply patches/001-token-redeem-via-apikey.patch
+# 在当前项目锁定的原版 new-api 基准上，逐个应用补丁
+git apply patches/001-api-key-self-service.patch
 
 # 如有空白差异，加 --ignore-whitespace
-git apply --ignore-whitespace patches/001-token-redeem-via-apikey.patch
+git apply --ignore-whitespace patches/001-api-key-self-service.patch
 
 # 如有轻微上下文偏移，用 3way merge
-git apply --3way patches/001-token-redeem-via-apikey.patch
+git apply --3way patches/001-api-key-self-service.patch
+```
+
+默认校验基准是 `22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。如果需要验证新的上游基准，可显式设置：
+
+```bash
+PATCH_BASE_REF=upstream/main make verify-patches
 ```
 
 ### 冲突时手动恢复
@@ -45,59 +51,26 @@ git apply --3way patches/001-token-redeem-via-apikey.patch
 
 ---
 
-## 001-token-redeem-via-apikey.patch
+## 001-api-key-self-service.patch
 
-**功能**：兑换码免登录兑换 — 通过 API Key (sk-xxx) 认证兑换，供 neko-api-key-tool 等外部工具使用；兑换成功时同时补到用户钱包和当前 token/key 额度，并在充值使用记录中显示兑换到的 token/key 名称。
+**功能**：API Key 自助能力。允许通过 API Key (`Bearer sk-xxx`) 免登录兑换兑换码，并查询当前 key 创建的异步任务列表。
 
-**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session。此补丁新增 `POST /api/token/redeem`，使用 `TokenAuthReadOnly` 中间件，允许通过 Bearer sk-xxx 免登录兑换；并在兑换成功时同步增加当前 token 的额度，方便 API Key 二次分发场景维持账实一致。充值日志会追加 token/key 名称，便于后续在使用记录中追踪具体兑换目标。
+**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session，异步任务列表也依赖登录态。本补丁面向 API Key 二次分发、外部控制台和轮询工具，集中提供只持有 API Key 时需要的自助能力。
 
-**涉及文件（5 个）**：
+**涉及文件（9 个）**：
 
 ### 1. `controller/token_test.go`
 
-在 token 控制器测试的临时 DB helper 中保存并恢复 `model.DB` / `model.LOG_DB`，避免本补丁新增的外部包兑换测试与现有 controller 包测试互相污染全局 DB。
+在 token 控制器测试的临时 DB helper 中保存并恢复 `model.DB` / `model.LOG_DB`，避免外部包控制器测试互相污染全局 DB。
 
 ### 2. `controller/user.go`
 
-在 `TopUp` 函数后面（`type UpdateUserSettingRequest struct` 之前）插入 `TokenRedeem` 函数：
+新增 `TokenRedeem`：
 
-```go
-// TokenRedeem 通过 API Key (sk-xxx) 认证的兑换码兑换接口。
-// 与 TopUp 逻辑一致，但认证方式不同：TopUp 需要用户登录 Session，
-// 而 TokenRedeem 使用 TokenAuthReadOnly 中间件，允许外部工具
-// （如 neko-api-key-tool）通过 Bearer sk-xxx 免登录兑换。
-func TokenRedeem(c *gin.Context) {
-	userId := c.GetInt("id")
-	lock := getTopUpLock(userId)
-	if !lock.TryLock() {
-		common.ApiErrorI18n(c, i18n.MsgUserTopUpProcessing)
-		return
-	}
-	defer lock.Unlock()
-	req := topUpRequest{}
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	quota, err := model.Redeem(req.Key, userId)
-	if err != nil {
-		if errors.Is(err, model.ErrRedeemFailed) {
-			common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
-			return
-		}
-		common.ApiError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    quota,
-	})
-}
-```
-
-**依赖**：复用同文件中已有的 `topUpRequest`、`getTopUpLock`，以及 `model.RedeemByToken`、`common.ApiError` 等。
+- 使用 `TokenAuthReadOnly()` 上下文中的用户和 token 信息
+- 复用原有 `topUpRequest`
+- 调用 `model.RedeemByToken`
+- 成功后返回兑换额度
 
 ### 3. `model/redemption.go`
 
@@ -108,42 +81,58 @@ func TokenRedeem(c *gin.Context) {
 - 读取当前 token 名称，并写入充值使用记录
 - 一并核销兑换码
 
-这样不会出现“钱包加了但 key 没加”的中间不一致状态。
-
 ### 4. `router/api-router.go`
 
-在 `usageRoute` 块结束后、`redemptionRoute` 块开始前，插入一行路由注册：
+新增两条 API Key 认证路由：
 
 ```go
-// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
 apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
 ```
 
-**定位标志**：找到 `tokenUsageRoute.GET("/", controller.GetTokenUsage)` 所在块的结束括号 `}`，在其后插入上述路由。
+### 5. `controller/task.go`
 
-### 5. `controller/user_token_redeem_test.go`
+新增 `GetUserTokenTask`：
 
-补充控制器回归测试，重点验证：
+- 从 `TokenAuthReadOnly()` 上下文中读取 `id` 和 `token_id`
+- 复用现有分页参数和任务筛选参数
+- 返回结构与 `/api/task/self` 保持一致
+
+### 6. `model/task.go`
+
+任务表新增独立 `token_id` 列，并新增按 token 维度查任务的方法：
+
+- `TaskGetAllUserTokenTask`
+- `TaskCountAllUserTokenTask`
+- 列表与总数查询直接走独立 `token_id` 列
+- 不为历史任务做懒回填，补丁上线前未写入该列的任务默认查不到
+
+### 7. `controller/relay.go`
+
+异步任务提交成功后，除了继续写 `private_data.token_id`，还同步写入任务表独立 `token_id` 列，保证新任务后续能走索引列查询。
+
+### 8. `controller/user_token_redeem_test.go`
+
+补充 API Key 兑换回归测试：
 
 - `Bearer sk-xxx` 可直接进入兑换链路
 - 成功后用户钱包增加
 - 成功后当前 token 的 `remain_quota` 同步增加
 - 成功后的充值使用记录包含 token/key 名称
 
+### 9. `controller/task_token_test.go`
+
+补充 API Key 任务列表回归测试：
+
+- `Bearer sk-xxx` 可直接访问新接口
+- 仅返回当前 token 创建的任务
+- `task_id` 过滤参数仍然生效
+
 ### 回归验证
 
-建议最小验证命令：
-
 ```bash
-go test ./controller -run '^TestTokenRedeem' -v
+go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
 ```
-
-验证重点：
-
-- `Bearer sk-xxx` 可直接兑换
-- 成功后用户钱包增加
-- 成功后当前 token 额度同步增加
-- 成功后使用记录显示兑换到的 token/key 名称
 
 ---
 
@@ -153,7 +142,7 @@ go test ./controller -run '^TestTokenRedeem' -v
 
 **背景**：对于做 API Key 二次分发的用户，仅退款到钱包不够，失败任务还需要按开关决定是否恢复 token 可用额度。当前实现引入环境变量 `TASK_REFUND_RESTORE_TOKEN_QUOTA`，默认关闭；开启后，失败退款会同时恢复 token 额度。
 
-**涉及文件（5 个）**：
+**涉及文件（7 个）**：
 
 ### 1. `common/constants.go`
 
@@ -183,51 +172,24 @@ if common.TaskRefundRestoreTokenQuota {
 
 ### 4. `service/task_billing_test.go`
 
-补充两类测试：
-
-- 开关关闭：失败后只退资金来源
-- 开关开启：失败后退资金来源并恢复 token 额度
-- `UpdateVideoTasks` 失败路径：命中真实视频轮询服务层后，失败任务触发退款
+补充开关关闭、开关开启和 `UpdateVideoTasks` 失败路径测试。
 
 ### 5. `scripts/seed_task_refund_fixture.go`
 
-离线生成 `002` 容器验收所需的 fixture：
-
-- 建立最小表结构
-- 写入测试用户、测试 token、测试视频渠道
-- 写入一条已预扣、待视频轮询失败的异步任务
-- 任务字段显式带上：
-  - 视频渠道类型
-  - 真实 `task.platform`
-  - 真实 `private_data.upstream_task_id`
-- 提供 `inspect` 模式回读任务 / 钱包 / token 结果
+离线生成 `002` 容器验收所需的 fixture。
 
 ### 6. `scripts/mock_video_failure_server.go`
 
-宿主机上的本地 mock 上游服务：
-
-- 提供 `GET /v1/videos/{task_id}` 失败响应
-- 提供 `/healthz` 供脚本等待启动完成
-- 提供 `/stats` 供脚本确认容器确实命中过视频轮询接口
+宿主机上的本地 mock 上游服务，提供失败视频任务响应、健康检查和命中统计。
 
 ### 7. `scripts/verify_task_refund_restore_token_quota.sh`
 
-更接近业务路径的黑盒验收脚本，覆盖两轮场景：
+黑盒验收脚本，覆盖 `TASK_REFUND_RESTORE_TOKEN_QUOTA=false` 和 `true` 两轮场景。
 
-- `TASK_REFUND_RESTORE_TOKEN_QUOTA=false`
-- `TASK_REFUND_RESTORE_TOKEN_QUOTA=true`
-
-脚本验证点：
-
-- 关闭 `TASK_TIMEOUT_MINUTES`，避免落到 timeout sweep 兜底路径
-- 通过 mock `/stats` 确认命中过真实视频轮询路径
-- 用户登录后 `GET /api/user/self` 中的钱包额度变化
-- `GET /api/usage/token/` 中的 key 剩余额度变化
-- 最终任务状态为 `FAILURE`
-
-建议验收命令：
+### 回归验证
 
 ```bash
+go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 ```
 
@@ -239,20 +201,11 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 **背景**：预扣费失败、额度不足或部分上游错误文案可能带出具体金额 / 额度数值，例如 `用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900`。这些数值可能暴露本地成本价、预扣费策略或上游额度细节，不适合透传给下游客户。
 
-**涉及文件（6 个）**：
+**涉及文件（7 个）**：
 
 ### 1. `common/str.go`
 
-新增 `MaskBillingAmountsForClient`，优先按计费语义标签脱敏，货币符号只作为无标签场景的保守兜底：
-
-- `¥0.056700` -> `¥***`
-- `＄0.060000` -> `＄***`
-- `token remain quota: 120` -> `token remain quota: ***`
-- `balance: credits 12.50` -> `balance: credits ***`
-- `balance: (estimated) 12.50` -> `balance: (estimated) ***`
-- `balance: tier 2 credits 12.50` -> `balance: tier 2 credits ***`
-- `balance: credits 12.50 request id 123` -> `balance: credits *** request id 123`
-- `need=69900` -> `need=***`
+新增 `MaskBillingAmountsForClient`，优先按计费语义标签脱敏，货币符号只作为无标签场景的保守兜底。
 
 ### 2. `types/error.go`
 
@@ -286,11 +239,11 @@ go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -c
 
 ## 004-sora-reference-video-double-price.patch
 
-**功能**：Sora 兼容 `/v1/videos` 请求中，白名单模型携带参考视频时按双倍计价。
+**功能**：Sora 兼容 `/v1/videos` 请求中，白名单模型携带参考视频时默认按旧双倍计价；开启环境变量后按“生成时长 + 参考视频总时长”精确计价。
 
-**背景**：部分视频生成模型在请求体 `content` 中携带 `video_url` 参考视频时，上游成本不同于普通文生视频请求。为了避免影响其他模型，本补丁只对环境变量 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 白名单中的模型生效。
+**背景**：部分视频生成模型在请求体 `content` 中携带 `video_url` 参考视频时，上游成本不同于普通文生视频请求。为兼顾稳定性和新计费规则，本补丁默认保持旧的 `video_input: 2` 计费；设置 `SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED=true` 后，才会检测参考视频时长并按精确规则计费。
 
-**涉及文件（4 个）**：
+**涉及文件（6 个）**：
 
 ### 1. `relay/common/relay_info.go`
 
@@ -298,32 +251,27 @@ go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -c
 
 ### 2. `relay/channel/task/sora/constants.go`
 
-新增环境变量白名单加载逻辑。默认白名单为空，不配置时任何模型都不会触发参考视频双倍计价。多个模型用英文逗号分隔：
-
-```bash
-SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS=seedance-2.0,seedance-2.0-pro
-```
+新增环境变量白名单和精确计费开关加载逻辑。默认白名单为空；默认不开启精确参考视频时长计费。
 
 ### 3. `main.go`
 
-在 `godotenv.Load(".env")` 和 `common.InitEnv()` 之后调用 `soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()`，确保 `.env` 中的 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 能被读取。
+在 `.env` 和 `common.InitEnv()` 之后调用 `soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
 
 ### 4. `relay/channel/task/sora/adaptor.go`
 
-在 `EstimateBilling` 中追加判断：
+在校验阶段识别白名单模型和精确计费开关：默认只在 `EstimateBilling` 中返回 `video_input: 2`；开启精确计费后检测参考视频总时长，并把 `seconds` 设置为 `生成时长 + 参考视频总时长`。
 
-- 模型名在环境变量白名单内
-- `content` 中存在 `type == "video_url"` 或 `video_url` 字段
+### 5. `relay/channel/task/sora/video_duration.go`
 
-两个条件同时满足时返回 `video_input: 2`，由现有 `OtherRatios` 机制乘入最终额度。
+新增参考视频时长检测：精确计费开启时，先用 HTTP Range 读取前 1MiB 尝试解析 MP4/MOV 元数据；失败后回退完整受限下载；仍无法解析或 30 秒内无法完成检测时拒绝请求。
 
-### 5. `relay/channel/task/sora/adaptor_test.go`
+### 6. `service/download.go`
 
-新增回归测试：
+为 Worker 请求增加 context 版本，确保参考视频检测超时时 Worker 模式也能及时返回本地错误。
 
-- 环境变量包含 `seedance-2.0` 时，`seedance-2.0` + `content.video_url` 返回 `video_input: 2`
-- 环境变量为空时，`seedance-2.0` + `content.video_url` 不返回 `video_input`
-- 环境变量变更只有显式 reload 后才会生效，避免包级初始化提前读取 `.env` 前的空值
+### 7. `relay/channel/task/sora/adaptor_test.go`
+
+覆盖默认旧双倍计费、精确计费开启后多参考视频时长累加、Range 失败回退完整下载、解析失败拒绝请求、超时拒绝请求、不配置模型白名单不生效，以及环境变量显式 reload 后才生效。
 
 ### 回归验证
 
@@ -334,59 +282,113 @@ go test ./relay/common
 
 ---
 
-## 005-task-list-via-apikey.patch
+## 005-project-maintenance-workflow.patch
 
-**功能**：通过 API Key (`Bearer sk-xxx`) 免登录查询“当前 key 创建的异步任务列表 / task_id”。
+**功能**：项目维护工作流。保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等工程化差异。
 
-**背景**：现有项目已经支持用 API Key 查询单个异步视频任务状态，但如果客户端没有保存提交时返回的 `task_id`，就无法只靠 API Key 找回“这个 key 创建过哪些任务”。本补丁新增一个只读列表接口，供外部控制台、轮询工具或 API Key 二次分发场景使用。
+**背景**：当前项目除了业务二开外，还需要保留一组用于同步上游、验证补丁和稳定构建的本地维护文件。该补丁用于确保“项目锁定的原版 new-api + patches” 能重放到当前现状。
 
-**涉及文件（6 个）**：
+**涉及文件（12 个）**：
 
-### 1. `router/api-router.go`
+### 1. `.github/workflows/docker-image-manual-ghcr.yml`
 
-在 `taskRoute` 下新增一条只读接口：
+保留手动 GHCR Docker 构建流程。
 
-```go
-taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
-```
+### 2. `.github/workflows/sync-upstream.yml`
 
-### 2. `controller/task.go`
+保留上游同步 workflow。运行时先暂存当前分支的 `patches/*.patch`，再从 `upstream/<branch>` 创建同步分支并应用暂存补丁，避免在已打补丁分支上重复 apply。
 
-新增 `GetUserTokenTask`：
+### 3. `.gitignore`
 
-- 从 `TokenAuthReadOnly()` 上下文中读取 `id` 和 `token_id`
-- 复用现有分页参数和任务筛选参数
-- 返回结构与 `/api/task/self` 保持一致
+保留本地生成物忽略规则。
 
-### 3. `model/task.go`
+### 4. `AGENTS.md`
 
-任务表新增独立 `token_id` 列，并新增按 token 维度查任务的方法：
+保留项目内 agent 工作约定。
 
-- `TaskGetAllUserTokenTask`
-- `TaskCountAllUserTokenTask`
-- 列表与总数查询直接走独立 `token_id` 列
-- 不为历史任务做懒回填，补丁上线前未写入该列的任务默认查不到
+### 5. `README.md` / `README.zh_CN.md`
 
-### 4. `controller/relay.go`
+保留本地维护说明入口。
 
-异步任务提交成功后，除了继续写 `private_data.token_id`，还同步写入任务表独立 `token_id` 列，保证新任务后续能走索引列查询。
+### 6. `makefile`
 
-### 5. `controller/task_token_test.go`
+保留 `verify-patches` 等本地维护命令。
 
-补充控制器回归测试，重点验证：
+### 7. `relay/common/relay_utils.go`
 
-- `Bearer sk-xxx` 可直接访问新接口
-- 仅返回当前 token 创建的任务
-- `task_id` 过滤参数仍然生效
+保留 multipart 请求体处理回归修复。
 
-### 6. `controller/user_token_redeem_test.go`
+### 8. `relay/common/relay_utils_test.go`
 
-调整测试 helper，确保多用户测试场景下 `users.username` / `users.aff_code` 不会撞唯一索引。
+覆盖 multipart 请求体回归测试。
+
+### 9. `scripts/sync_upstream_local.sh`
+
+本地上游同步脚本。
+
+### 10. `scripts/verify_patches.sh`
+
+二开补丁配对和可重放校验脚本。
+
+### 11. `tools/skills/newapi-upstream-sync/SKILL.md`
+
+本地上游同步 skill 说明。
 
 ### 回归验证
 
 ```bash
-go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
+make verify-patches
+go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
+```
+
+---
+
+## 006-frontend-lock.patch
+
+**功能**：前端弱隐藏锁屏。设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问前端页面需要先输入密码。
+
+**背景**：公开 API 域名有时会同时暴露前端入口。本补丁用于降低普通访客直接看到管理页面入口的概率，但不提供真正安全隔离。
+
+**涉及文件（8 个）**：
+
+### 1. `main.go`
+
+新增 `InjectFrontendLockPassword`，在服务启动时读取 `FRONTEND_LOCK_PASSWORD` 并注入 `window.__FRONTEND_LOCK_PASSWORD__`。
+
+### 2. `main_test.go`
+
+覆盖空密码跳过注入、正常密码注入，以及 `</script>` 等字符被 JSON 安全转义。
+
+### 3. `web/src/index.jsx`
+
+在根渲染处增加 `FrontendLockGate`，锁定时渲染锁屏，解锁后恢复原 `PageLayout`。
+
+### 4. `web/src/helpers/frontendLock.js`
+
+封装密码读取、开关判断、会话解锁状态和密码校验逻辑。
+
+### 5. `web/src/components/common/FrontendLock.jsx`
+
+新增锁屏 UI，展示公告并提供密码输入。
+
+### 6. `docs/customizations/006-frontend-lock.md`
+
+记录二开背景、行为、风险和验证命令。
+
+### 7. `docs/customizations/README.md`
+
+登记 006 二开。
+
+### 8. `patches/README.md`
+
+登记 006 补丁。
+
+### 回归验证
+
+```bash
+go test . -run TestInjectFrontendLockPassword -count=1
+(cd web && bun run build)
+make verify-patches
 ```
 
 ---

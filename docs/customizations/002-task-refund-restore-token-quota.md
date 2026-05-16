@@ -119,6 +119,7 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 - 通过 `GET /api/usage/token/` 验证 key/token 剩余额度是否恢复
 - 通过 mock `/stats` 验证容器确实命中过上游视频轮询接口
 - 最后回读数据库，确认任务状态已经落为 `FAILURE`
+- 两个辅助 Go 脚本带 `//go:build ignore`，避免进入默认 `go build ./...`；仍可通过 `go run ./scripts/*.go` 单文件执行
 
 当前黑盒验收基线：
 

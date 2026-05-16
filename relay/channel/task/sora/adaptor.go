@@ -91,7 +91,13 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	if info.Action == constant.TaskActionRemix {
 		return validateRemixRequest(c)
 	}
-	return relaycommon.ValidateMultipartDirect(c, info)
+	if taskErr := relaycommon.ValidateMultipartDirect(c, info); taskErr != nil {
+		return taskErr
+	}
+	if taskErr := prepareReferenceVideoBilling(c, info); taskErr != nil {
+		return taskErr
+	}
+	return nil
 }
 
 // EstimateBilling 根据用户请求的 seconds 和 size 计算 OtherRatios。
@@ -126,17 +132,45 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if size == "1792x1024" || size == "1024x1792" {
 		ratios["size"] = 1.666667
 	}
-	if shouldDoublePriceReferenceVideo(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
+	if referenceVideoSeconds, ok := getReferenceVideoTotalSeconds(c); ok {
+		ratios["seconds"] = float64(seconds) + referenceVideoSeconds
+	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
 		ratios["video_input"] = 2
 	}
 	return ratios
 }
 
-func shouldDoublePriceReferenceVideo(modelName string, req relaycommon.TaskSubmitReq) bool {
+func shouldApplyReferenceVideoDurationBilling(modelName string, req relaycommon.TaskSubmitReq) bool {
 	if modelName == "" {
 		modelName = req.Model
 	}
 	return IsReferenceVideoDoublePriceModel(modelName)
+}
+
+func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil
+	}
+	if !shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) {
+		return nil
+	}
+	if !ReferenceVideoDurationBillingEnabled() {
+		return nil
+	}
+	urls, err := extractReferenceVideoURLs(req.Content)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "reference_video_duration_unavailable", http.StatusBadRequest)
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	totalSeconds, err := sumReferenceVideoDurationsWithTimeout(c.Request.Context(), urls)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "reference_video_duration_unavailable", http.StatusBadRequest)
+	}
+	setReferenceVideoTotalSeconds(c, totalSeconds)
+	return nil
 }
 
 func hasReferenceVideo(content []map[string]any) bool {

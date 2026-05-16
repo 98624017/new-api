@@ -1,3 +1,88 @@
+diff --git a/common/billing_amount_mask_test.go b/common/billing_amount_mask_test.go
+new file mode 100644
+index 000000000..ff50a9971
+--- /dev/null
++++ b/common/billing_amount_mask_test.go
+@@ -0,0 +1,79 @@
++package common
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestMaskBillingAmountsForClient(t *testing.T) {
++	t.Parallel()
++
++	tests := []struct {
++		name string
++		in   string
++		want string
++	}{
++		{
++			name: "chinese pre consume quota with currency",
++			in:   "status_code=403, 预扣费额度失败, 用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900 (request id req_123)",
++			want: "status_code=403, 预扣费额度失败, 用户剩余额度: ¥***, 需要预扣费额度: ¥*** (request id req_123)",
++		},
++		{
++			name: "chinese pre consume quota with fullwidth dollar",
++			in:   "status_code=403, 预扣费额度失败, 用户剩余额度: ＄0.053570, 需要预扣费额度: ＄0.060000",
++			want: "status_code=403, 预扣费额度失败, 用户剩余额度: ＄***, 需要预扣费额度: ＄***",
++		},
++		{
++			name: "english quota labels without currency",
++			in:   "token quota is not enough, token remain quota: 120, need quota: 300",
++			want: "token quota is not enough, token remain quota: ***, need quota: ***",
++		},
++		{
++			name: "billing label with custom unit prefix",
++			in:   "upstream balance: credits 12.50, request id req_123",
++			want: "upstream balance: credits ***, request id req_123",
++		},
++		{
++			name: "billing label with bracket prefix",
++			in:   "upstream balance: (estimated) 12.50, request id req_123",
++			want: "upstream balance: (estimated) ***, request id req_123",
++		},
++		{
++			name: "billing label with numeric prefix",
++			in:   "upstream balance: tier 2 credits 12.50, request id req_123",
++			want: "upstream balance: tier 2 credits ***, request id req_123",
++		},
++		{
++			name: "billing amount before numeric request id",
++			in:   "upstream balance: credits 12.50 request id 123",
++			want: "upstream balance: credits *** request id 123",
++		},
++		{
++			name: "subscription need equals",
++			in:   "subscription quota insufficient, need=69900",
++			want: "subscription quota insufficient, need=***",
++		},
++		{
++			name: "unrelated status code and request id numbers stay visible",
++			in:   "status_code=403, upstream failed (request id req_123456)",
++			want: "status_code=403, upstream failed (request id req_123456)",
++		},
++	}
++
++	for _, tt := range tests {
++		tt := tt
++		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
++
++			got := MaskBillingAmountsForClient(tt.in)
++			if got != tt.want {
++				t.Fatalf("MaskBillingAmountsForClient() = %q, want %q", got, tt.want)
++			}
++			if strings.Contains(got, "0.056700") || strings.Contains(got, "0.069900") ||
++				strings.Contains(got, "0.053570") || strings.Contains(got, "0.060000") ||
++				strings.Contains(got, "12.50") {
++				t.Fatalf("masked message still contains original amount: %q", got)
++			}
++		})
++	}
++}
 diff --git a/common/str.go b/common/str.go
 index 71391f722..4ad611e5b 100644
 --- a/common/str.go
@@ -244,3 +329,81 @@ index 9717401ae..bae723536 100644
  	if result.Message == "" {
  		result.Message = string(e.errorType)
  	}
+diff --git a/types/error_test.go b/types/error_test.go
+new file mode 100644
+index 000000000..5a66bd727
+--- /dev/null
++++ b/types/error_test.go
+@@ -0,0 +1,72 @@
++package types
++
++import (
++	"errors"
++	"net/http"
++	"strings"
++	"testing"
++)
++
++func TestNewAPIErrorToOpenAIErrorMasksBillingAmounts(t *testing.T) {
++	t.Parallel()
++
++	err := NewErrorWithStatusCode(
++		errors.New("预扣费额度失败, 用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900 (request id req_123)"),
++		ErrorCodeInsufficientUserQuota,
++		http.StatusForbidden,
++	)
++
++	openAIError := err.ToOpenAIError()
++
++	if strings.Contains(openAIError.Message, "0.056700") || strings.Contains(openAIError.Message, "0.069900") {
++		t.Fatalf("expected billing amounts to be masked, got %q", openAIError.Message)
++	}
++	if !strings.Contains(openAIError.Message, "用户剩余额度: ¥***") ||
++		!strings.Contains(openAIError.Message, "需要预扣费额度: ¥***") {
++		t.Fatalf("expected masked quota labels to remain readable, got %q", openAIError.Message)
++	}
++	if !strings.Contains(openAIError.Message, "request id req_123") {
++		t.Fatalf("expected request id to remain visible, got %q", openAIError.Message)
++	}
++}
++
++func TestNewAPIErrorToClaudeErrorMasksBillingAmounts(t *testing.T) {
++	t.Parallel()
++
++	err := NewErrorWithStatusCode(
++		errors.New("token quota is not enough, token remain quota: 120, need quota: 300"),
++		ErrorCodePreConsumeTokenQuotaFailed,
++		http.StatusForbidden,
++	)
++
++	claudeError := err.ToClaudeError()
++
++	if strings.Contains(claudeError.Message, "120") || strings.Contains(claudeError.Message, "300") {
++		t.Fatalf("expected billing amounts to be masked, got %q", claudeError.Message)
++	}
++	if !strings.Contains(claudeError.Message, "token remain quota: ***") ||
++		!strings.Contains(claudeError.Message, "need quota: ***") {
++		t.Fatalf("expected masked quota labels to remain readable, got %q", claudeError.Message)
++	}
++}
++
++func TestNewAPIErrorMaskSensitiveErrorWithStatusCodeMasksBillingAmounts(t *testing.T) {
++	t.Parallel()
++
++	err := NewErrorWithStatusCode(
++		errors.New("预扣费额度失败, 用户剩余额度: ＄0.053570, 需要预扣费额度: ＄0.060000"),
++		ErrorCodeInsufficientUserQuota,
++		http.StatusForbidden,
++	)
++
++	msg := err.MaskSensitiveErrorWithStatusCode()
++
++	if strings.Contains(msg, "0.053570") || strings.Contains(msg, "0.060000") {
++		t.Fatalf("expected billing amounts to be masked in status-code error, got %q", msg)
++	}
++	if !strings.Contains(msg, "status_code=403") ||
++		!strings.Contains(msg, "用户剩余额度: ＄***") ||
++		!strings.Contains(msg, "需要预扣费额度: ＄***") {
++		t.Fatalf("expected status code and masked quota labels to remain readable, got %q", msg)
++	}
++}

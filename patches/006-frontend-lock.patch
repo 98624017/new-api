@@ -1,0 +1,449 @@
+diff --git a/docs/customizations/006-frontend-lock.md b/docs/customizations/006-frontend-lock.md
+new file mode 100644
+index 000000000..55141abfb
+--- /dev/null
++++ b/docs/customizations/006-frontend-lock.md
+@@ -0,0 +1,45 @@
++# 006-frontend-lock
++
++## 目标
++
++增加一个可选的前端弱隐藏门禁。部署者设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问 new-api 前端页面会先看到锁屏和公告；输入正确密码后，本次浏览器会话内继续访问原前端。
++
++## 背景
++
++部分部署只希望公开 API Base URL 给下游用户调用，不希望普通访客打开同一域名时直接看到 new-api 网页入口。完整安全隔离应通过 Cloudflare Access、反向代理路径限制、源站防火墙或后端鉴权实现。本补丁只提供轻量弱隐藏，降低普通访客误入概率。
++
++## 行为
++
++- `FRONTEND_LOCK_PASSWORD` 为空：前端不显示锁屏，行为与原项目一致。
++- `FRONTEND_LOCK_PASSWORD` 非空：Go 服务启动时把密码注入到 `index.html` 的 `window.__FRONTEND_LOCK_PASSWORD__`。
++- 前端加载后，如果本次浏览器会话尚未解锁，则显示锁屏页。
++- 密码正确后写入 `sessionStorage`，当前浏览器会话内不再提示。
++- API 调用路径不受影响，因为 API 客户端不会加载前端页面。
++- 本地 Vite 开发可使用 `VITE_FRONTEND_LOCK_PASSWORD` 预览锁屏。
++
++## 风险
++
++这不是安全边界。密码会出现在浏览器可见的 HTML/JS 中，具备前端调试能力的人可以找到它。该功能只能防普通访客，不能替代：
++
++- Cloudflare Access
++- 反向代理按域名/路径限制
++- 源站防火墙
++- 后端鉴权
++
++变更 `FRONTEND_LOCK_PASSWORD` 后需要重启服务。已经解锁的浏览器会话在关闭前不会重新提示。
++
++## 涉及文件
++
++- `main.go`
++- `main_test.go`
++- `web/src/index.jsx`
++- `web/src/components/common/FrontendLock.jsx`
++- `web/src/helpers/frontendLock.js`
++
++## 验证
++
++```bash
++go test . -run TestInjectFrontendLockPassword -count=1
++cd web && bun run build
++make verify-patches
++```
+diff --git a/main.go b/main.go
+index ac78a5814..1b6ecfda5 100644
+--- a/main.go
++++ b/main.go
+@@ -182,6 +182,7 @@ func main() {
+ 
+ 	InjectUmamiAnalytics()
+ 	InjectGoogleAnalytics()
++	InjectFrontendLockPassword()
+ 
+ 	// 设置路由
+ 	router.SetRouter(server, buildFS, indexPage)
+@@ -240,6 +241,27 @@ func InjectGoogleAnalytics() {
+ 	indexPage = bytes.ReplaceAll(indexPage, []byte("<!--Google Analytics-->\n"), []byte(analyticsInject))
+ }
+ 
++func InjectFrontendLockPassword() {
++	password := os.Getenv("FRONTEND_LOCK_PASSWORD")
++	if password == "" {
++		return
++	}
++
++	passwordJSON, err := common.Marshal(password)
++	if err != nil {
++		common.SysError(fmt.Sprintf("failed to encode frontend lock password: %v", err))
++		return
++	}
++
++	script := []byte("<script>window.__FRONTEND_LOCK_PASSWORD__=" + string(passwordJSON) + ";</script>\n")
++	headEnd := []byte("</head>")
++	if bytes.Contains(indexPage, headEnd) {
++		indexPage = bytes.Replace(indexPage, headEnd, append(script, headEnd...), 1)
++		return
++	}
++	indexPage = append(indexPage, script...)
++}
++
+ func InitResources() error {
+ 	// Initialize resources here if needed
+ 	// This is a placeholder function for future resource initialization
+diff --git a/main_test.go b/main_test.go
+new file mode 100644
+index 000000000..51391547f
+--- /dev/null
++++ b/main_test.go
+@@ -0,0 +1,61 @@
++package main
++
++import (
++	"bytes"
++	"testing"
++)
++
++func TestInjectFrontendLockPasswordSkipsEmptyPassword(t *testing.T) {
++	originalIndexPage := indexPage
++	defer func() {
++		indexPage = originalIndexPage
++	}()
++
++	t.Setenv("FRONTEND_LOCK_PASSWORD", "")
++	indexPage = []byte("<!doctype html><html><head></head><body></body></html>")
++
++	InjectFrontendLockPassword()
++
++	if bytes.Contains(indexPage, []byte("__FRONTEND_LOCK_PASSWORD__")) {
++		t.Fatalf("expected empty password to skip frontend lock injection, got %s", string(indexPage))
++	}
++}
++
++func TestInjectFrontendLockPasswordInjectsConfiguredPassword(t *testing.T) {
++	originalIndexPage := indexPage
++	defer func() {
++		indexPage = originalIndexPage
++	}()
++
++	t.Setenv("FRONTEND_LOCK_PASSWORD", "open-sesame")
++	indexPage = []byte("<!doctype html><html><head><title>New API</title></head><body></body></html>")
++
++	InjectFrontendLockPassword()
++
++	expected := []byte(`<script>window.__FRONTEND_LOCK_PASSWORD__="open-sesame";</script>`)
++	if !bytes.Contains(indexPage, expected) {
++		t.Fatalf("expected frontend lock password injection, got %s", string(indexPage))
++	}
++	if bytes.Index(indexPage, expected) > bytes.Index(indexPage, []byte("</head>")) {
++		t.Fatalf("expected frontend lock script to be injected before </head>, got %s", string(indexPage))
++	}
++}
++
++func TestInjectFrontendLockPasswordEscapesScriptBreakingCharacters(t *testing.T) {
++	originalIndexPage := indexPage
++	defer func() {
++		indexPage = originalIndexPage
++	}()
++
++	t.Setenv("FRONTEND_LOCK_PASSWORD", `x"</script><script>alert(1)</script>`)
++	indexPage = []byte("<!doctype html><html><head></head><body></body></html>")
++
++	InjectFrontendLockPassword()
++
++	if bytes.Contains(indexPage, []byte(`"</script><script>`)) {
++		t.Fatalf("expected injected password to escape script-breaking content, got %s", string(indexPage))
++	}
++	if !bytes.Contains(indexPage, []byte(`\u003c/script\u003e\u003cscript\u003e`)) {
++		t.Fatalf("expected HTML-sensitive characters to be JSON escaped, got %s", string(indexPage))
++	}
++}
+diff --git a/web/src/components/common/FrontendLock.jsx b/web/src/components/common/FrontendLock.jsx
+new file mode 100644
+index 000000000..b56e034bd
+--- /dev/null
++++ b/web/src/components/common/FrontendLock.jsx
+@@ -0,0 +1,197 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import React, { useEffect, useMemo, useState } from 'react';
++import { Button, Empty, Input, Timeline, Typography } from '@douyinfe/semi-ui';
++import { LockKeyhole, Megaphone } from 'lucide-react';
++import { marked } from 'marked';
++import { API } from '../../helpers';
++import {
++  unlockFrontendSession,
++  verifyFrontendLockPassword,
++} from '../../helpers/frontendLock';
++
++const { Text, Title } = Typography;
++
++const FrontendLock = ({ onUnlock }) => {
++  const [password, setPassword] = useState('');
++  const [error, setError] = useState('');
++  const [noticeHtml, setNoticeHtml] = useState('');
++  const [announcements, setAnnouncements] = useState([]);
++  const [loadingNotice, setLoadingNotice] = useState(true);
++
++  useEffect(() => {
++    let mounted = true;
++
++    async function loadNotice() {
++      setLoadingNotice(true);
++      const [noticeResult, statusResult] = await Promise.allSettled([
++        API.get('/api/notice', { disableDuplicate: true }),
++        API.get('/api/status', { disableDuplicate: true }),
++      ]);
++
++      if (!mounted) {
++        return;
++      }
++
++      if (
++        noticeResult.status === 'fulfilled' &&
++        noticeResult.value?.data?.success &&
++        noticeResult.value.data.data
++      ) {
++        setNoticeHtml(marked.parse(noticeResult.value.data.data));
++      }
++
++      if (
++        statusResult.status === 'fulfilled' &&
++        statusResult.value?.data?.success &&
++        Array.isArray(statusResult.value.data.data?.announcements)
++      ) {
++        setAnnouncements(
++          statusResult.value.data.data.announcements.slice(0, 5),
++        );
++      }
++
++      setLoadingNotice(false);
++    }
++
++    loadNotice().catch(() => {
++      if (mounted) {
++        setLoadingNotice(false);
++      }
++    });
++
++    return () => {
++      mounted = false;
++    };
++  }, []);
++
++  const processedAnnouncements = useMemo(() => {
++    return announcements.map((item, index) => ({
++      key: `${item?.publishDate || index}-${index}`,
++      type: item?.type || 'default',
++      time: item?.publishDate || '',
++      contentHtml: marked.parse(item?.content || ''),
++      extraHtml: item?.extra ? marked.parse(item.extra) : '',
++    }));
++  }, [announcements]);
++
++  const handleSubmit = (event) => {
++    event.preventDefault();
++    if (!verifyFrontendLockPassword(password)) {
++      setError('密码不正确');
++      return;
++    }
++
++    unlockFrontendSession();
++    setError('');
++    onUnlock();
++  };
++
++  return (
++    <main className='min-h-screen bg-semi-color-bg-0 text-semi-color-text-0'>
++      <div className='mx-auto flex min-h-screen w-full max-w-5xl flex-col px-5 py-8 md:px-8'>
++        <section className='grid flex-1 items-center gap-8 md:grid-cols-[0.9fr_1.1fr]'>
++          <div className='space-y-6'>
++            <div className='inline-flex h-12 w-12 items-center justify-center rounded-lg border border-semi-color-border bg-semi-color-fill-0'>
++              <LockKeyhole size={24} />
++            </div>
++            <div className='space-y-3'>
++              <Title heading={2} className='!m-0'>
++                访问已锁定
++              </Title>
++              <Text type='tertiary'>
++                请输入访问密码继续进入站点。API 调用不受此页面影响。
++              </Text>
++            </div>
++
++            <form className='max-w-sm space-y-3' onSubmit={handleSubmit}>
++              <Input
++                type='password'
++                value={password}
++                onChange={setPassword}
++                placeholder='输入访问密码'
++                size='large'
++                autoFocus
++              />
++              {error && <Text type='danger'>{error}</Text>}
++              <Button
++                htmlType='submit'
++                type='primary'
++                theme='solid'
++                size='large'
++                block
++              >
++                解锁访问
++              </Button>
++            </form>
++          </div>
++
++          <div className='space-y-5'>
++            <div className='border-b border-semi-color-border pb-3'>
++              <div className='flex items-center gap-2'>
++                <Megaphone size={18} />
++                <Title heading={4} className='!m-0'>
++                  站点公告
++                </Title>
++              </div>
++            </div>
++
++            {loadingNotice ? (
++              <Empty description='公告加载中...' />
++            ) : noticeHtml ? (
++              <div
++                className='notice-content-scroll max-h-72 overflow-y-auto pr-2 leading-7'
++                dangerouslySetInnerHTML={{ __html: noticeHtml }}
++              />
++            ) : (
++              <Empty description='暂无公告' />
++            )}
++
++            {processedAnnouncements.length > 0 && (
++              <Timeline mode='left'>
++                {processedAnnouncements.map((item) => (
++                  <Timeline.Item
++                    key={item.key}
++                    type={item.type}
++                    time={item.time}
++                    extra={
++                      item.extraHtml ? (
++                        <div
++                          className='text-xs text-semi-color-text-2'
++                          dangerouslySetInnerHTML={{ __html: item.extraHtml }}
++                        />
++                      ) : null
++                    }
++                  >
++                    <div
++                      dangerouslySetInnerHTML={{ __html: item.contentHtml }}
++                    />
++                  </Timeline.Item>
++                ))}
++              </Timeline>
++            )}
++          </div>
++        </section>
++      </div>
++    </main>
++  );
++};
++
++export default FrontendLock;
+diff --git a/web/src/helpers/frontendLock.js b/web/src/helpers/frontendLock.js
+new file mode 100644
+index 000000000..2dfda20b4
+--- /dev/null
++++ b/web/src/helpers/frontendLock.js
+@@ -0,0 +1,32 @@
++const FRONTEND_LOCK_SESSION_KEY = 'new_api_frontend_lock_unlocked';
++
++export function getFrontendLockPassword() {
++  if (
++    typeof window !== 'undefined' &&
++    typeof window.__FRONTEND_LOCK_PASSWORD__ === 'string'
++  ) {
++    return window.__FRONTEND_LOCK_PASSWORD__;
++  }
++  return import.meta.env.VITE_FRONTEND_LOCK_PASSWORD || '';
++}
++
++export function isFrontendLockEnabled() {
++  return getFrontendLockPassword().trim() !== '';
++}
++
++export function isFrontendLockUnlocked() {
++  if (!isFrontendLockEnabled() || typeof sessionStorage === 'undefined') {
++    return !isFrontendLockEnabled();
++  }
++  return sessionStorage.getItem(FRONTEND_LOCK_SESSION_KEY) === '1';
++}
++
++export function unlockFrontendSession() {
++  if (typeof sessionStorage !== 'undefined') {
++    sessionStorage.setItem(FRONTEND_LOCK_SESSION_KEY, '1');
++  }
++}
++
++export function verifyFrontendLockPassword(input) {
++  return input === getFrontendLockPassword();
++}
+diff --git a/web/src/index.jsx b/web/src/index.jsx
+index 5162b0cbd..17ace73e5 100644
+--- a/web/src/index.jsx
++++ b/web/src/index.jsx
+@@ -26,12 +26,17 @@ import 'react-toastify/dist/ReactToastify.css';
+ import { StatusProvider } from './context/Status';
+ import { ThemeProvider } from './context/Theme';
+ import PageLayout from './components/layout/PageLayout';
++import FrontendLock from './components/common/FrontendLock';
+ import './i18n/i18n';
+ import './index.css';
+ import { LocaleProvider } from '@douyinfe/semi-ui';
+ import { useTranslation } from 'react-i18next';
+ import zh_CN from '@douyinfe/semi-ui/lib/es/locale/source/zh_CN';
+ import en_GB from '@douyinfe/semi-ui/lib/es/locale/source/en_GB';
++import {
++  isFrontendLockEnabled,
++  isFrontendLockUnlocked,
++} from './helpers/frontendLock';
+ 
+ // 欢迎信息（二次开发者未经允许不准将此移除）
+ // Welcome message (Do not remove this without permission from the original developer)
+@@ -52,6 +57,18 @@ function SemiLocaleWrapper({ children }) {
+   return <LocaleProvider locale={semiLocale}>{children}</LocaleProvider>;
+ }
+ 
++function FrontendLockGate() {
++  const [locked, setLocked] = React.useState(
++    () => isFrontendLockEnabled() && !isFrontendLockUnlocked(),
++  );
++
++  if (locked) {
++    return <FrontendLock onUnlock={() => setLocked(false)} />;
++  }
++
++  return <PageLayout />;
++}
++
+ // initialization
+ 
+ const root = ReactDOM.createRoot(document.getElementById('root'));
+@@ -67,7 +84,7 @@ root.render(
+         >
+           <ThemeProvider>
+             <SemiLocaleWrapper>
+-              <PageLayout />
++              <FrontendLockGate />
+             </SemiLocaleWrapper>
+           </ThemeProvider>
+         </BrowserRouter>

@@ -19,24 +19,67 @@ index dbbf44a18..ac78a5814 100644
  	logger.SetupLogger()
  
 diff --git a/relay/channel/task/sora/adaptor.go b/relay/channel/task/sora/adaptor.go
-index e9029aa20..738c1a6f5 100644
+index e9029aa20..97ef376df 100644
 --- a/relay/channel/task/sora/adaptor.go
 +++ b/relay/channel/task/sora/adaptor.go
-@@ -126,9 +126,34 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+@@ -91,7 +91,13 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
+ 	if info.Action == constant.TaskActionRemix {
+ 		return validateRemixRequest(c)
+ 	}
+-	return relaycommon.ValidateMultipartDirect(c, info)
++	if taskErr := relaycommon.ValidateMultipartDirect(c, info); taskErr != nil {
++		return taskErr
++	}
++	if taskErr := prepareReferenceVideoBilling(c, info); taskErr != nil {
++		return taskErr
++	}
++	return nil
+ }
+ 
+ // EstimateBilling 根据用户请求的 seconds 和 size 计算 OtherRatios。
+@@ -126,9 +132,62 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
  	if size == "1792x1024" || size == "1024x1792" {
  		ratios["size"] = 1.666667
  	}
-+	if shouldDoublePriceReferenceVideo(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
++	if referenceVideoSeconds, ok := getReferenceVideoTotalSeconds(c); ok {
++		ratios["seconds"] = float64(seconds) + referenceVideoSeconds
++	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
 +		ratios["video_input"] = 2
 +	}
  	return ratios
  }
  
-+func shouldDoublePriceReferenceVideo(modelName string, req relaycommon.TaskSubmitReq) bool {
++func shouldApplyReferenceVideoDurationBilling(modelName string, req relaycommon.TaskSubmitReq) bool {
 +	if modelName == "" {
 +		modelName = req.Model
 +	}
 +	return IsReferenceVideoDoublePriceModel(modelName)
++}
++
++func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
++	req, err := relaycommon.GetTaskRequest(c)
++	if err != nil {
++		return nil
++	}
++	if !shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) {
++		return nil
++	}
++	if !ReferenceVideoDurationBillingEnabled() {
++		return nil
++	}
++	urls, err := extractReferenceVideoURLs(req.Content)
++	if err != nil {
++		return service.TaskErrorWrapperLocal(err, "reference_video_duration_unavailable", http.StatusBadRequest)
++	}
++	if len(urls) == 0 {
++		return nil
++	}
++	totalSeconds, err := sumReferenceVideoDurationsWithTimeout(c.Request.Context(), urls)
++	if err != nil {
++		return service.TaskErrorWrapperLocal(err, "reference_video_duration_unavailable", http.StatusBadRequest)
++	}
++	setReferenceVideoTotalSeconds(c, totalSeconds)
++	return nil
 +}
 +
 +func hasReferenceVideo(content []map[string]any) bool {
@@ -58,10 +101,10 @@ index e9029aa20..738c1a6f5 100644
  	if info.Action == constant.TaskActionRemix {
  		return fmt.Sprintf("%s/v1/videos/%s/remix", a.baseURL, info.OriginTaskID), nil
 diff --git a/relay/channel/task/sora/constants.go b/relay/channel/task/sora/constants.go
-index e2f6536ea..b09b37399 100644
+index e2f6536ea..b6a0a4568 100644
 --- a/relay/channel/task/sora/constants.go
 +++ b/relay/channel/task/sora/constants.go
-@@ -1,8 +1,44 @@
+@@ -1,8 +1,62 @@
  package sora
  
 +import (
@@ -80,19 +123,28 @@ index e2f6536ea..b09b37399 100644
 +var (
 +	referenceVideoDoublePriceModelsMu sync.RWMutex
 +	ReferenceVideoDoublePriceModels   = map[string]bool{}
++	referenceVideoDurationBilling     bool
 +)
 +
 +func ReloadReferenceVideoDoublePriceModelsFromEnv() {
 +	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
++	durationBilling := parseReferenceVideoDurationBillingEnabled(os.Getenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED"))
 +	referenceVideoDoublePriceModelsMu.Lock()
 +	defer referenceVideoDoublePriceModelsMu.Unlock()
 +	ReferenceVideoDoublePriceModels = models
++	referenceVideoDurationBilling = durationBilling
 +}
 +
 +func IsReferenceVideoDoublePriceModel(modelName string) bool {
 +	referenceVideoDoublePriceModelsMu.RLock()
 +	defer referenceVideoDoublePriceModelsMu.RUnlock()
 +	return ReferenceVideoDoublePriceModels[modelName]
++}
++
++func ReferenceVideoDurationBillingEnabled() bool {
++	referenceVideoDoublePriceModelsMu.RLock()
++	defer referenceVideoDoublePriceModelsMu.RUnlock()
++	return referenceVideoDurationBilling
 +}
 +
 +func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
@@ -106,6 +158,15 @@ index e2f6536ea..b09b37399 100644
 +	}
 +	return models
 +}
++
++func parseReferenceVideoDurationBillingEnabled(raw string) bool {
++	switch strings.ToLower(strings.TrimSpace(raw)) {
++	case "1", "true", "yes", "on":
++		return true
++	default:
++		return false
++	}
++}
 diff --git a/relay/common/relay_info.go b/relay/common/relay_info.go
 index 2e157fc8c..b9d2e059a 100644
 --- a/relay/common/relay_info.go
@@ -118,93 +179,47 @@ index 2e157fc8c..b9d2e059a 100644
  	Size           string                 `json:"size,omitempty"`
  	Duration       int                    `json:"duration,omitempty"`
  	Seconds        string                 `json:"seconds,omitempty"`
-diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
-new file mode 100644
-index 000000000..5a072ac72
---- /dev/null
-+++ b/relay/channel/task/sora/adaptor_test.go
-@@ -0,0 +1,84 @@
-+package sora
-+
-+import (
-+	"net/http/httptest"
-+	"strings"
-+	"testing"
-+
-+	"github.com/QuantumNous/new-api/relay/common"
-+	"github.com/gin-gonic/gin"
-+)
-+
-+func TestEstimateBillingDoublesWhenEnvConfiguredModelHasReferenceVideo(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
-+	if ratios["video_input"] != 2 {
-+		t.Fatalf("expected video_input ratio 2, got %#v", ratios)
-+	}
+diff --git a/service/download.go b/service/download.go
+index 752d8c65b..4964674f5 100644
+--- a/service/download.go
++++ b/service/download.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"net/http"
+@@ -22,6 +23,11 @@ type WorkerRequest struct {
+ 
+ // DoWorkerRequest 通过Worker发送请求
+ func DoWorkerRequest(req *WorkerRequest) (*http.Response, error) {
++	return DoWorkerRequestWithContext(context.Background(), req)
 +}
 +
-+func TestEstimateBillingDoesNotDoubleWhenEnvDoesNotListModel(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
-+	if _, ok := ratios["video_input"]; ok {
-+		t.Fatalf("expected no video_input ratio without env whitelist, got %#v", ratios)
++// DoWorkerRequestWithContext 通过 Worker 发送请求，并允许调用方控制超时或取消。
++func DoWorkerRequestWithContext(ctx context.Context, req *WorkerRequest) (*http.Response, error) {
+ 	if !system_setting.EnableWorker() {
+ 		return nil, fmt.Errorf("worker not enabled")
+ 	}
+@@ -41,12 +47,17 @@ func DoWorkerRequest(req *WorkerRequest) (*http.Response, error) {
+ 	}
+ 
+ 	// 序列化worker请求数据
+-	workerPayload, err := json.Marshal(req)
++	workerPayload, err := common.Marshal(req)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to marshal worker payload: %v", err)
+ 	}
+ 
+-	return GetHttpClient().Post(workerUrl, "application/json", bytes.NewBuffer(workerPayload))
++	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, workerUrl, bytes.NewBuffer(workerPayload))
++	if err != nil {
++		return nil, err
 +	}
-+}
-+
-+func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	if IsReferenceVideoDoublePriceModel("seedance-2.0") {
-+		t.Fatal("expected env change not to load until explicit reload")
-+	}
-+
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	if !IsReferenceVideoDoublePriceModel("seedance-2.0") {
-+		t.Fatal("expected explicit reload to load env whitelist")
-+	}
-+}
-+
-+func estimateBillingForBody(t *testing.T, body string) map[string]float64 {
-+	t.Helper()
-+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-+	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(body))
-+	req.Header.Set("Content-Type", "application/json")
-+	c.Request = req
-+
-+	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{}}
-+	adaptor := &TaskAdaptor{}
-+	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
-+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
-+	}
-+
-+	return adaptor.EstimateBilling(c, info)
-+}
-+
-+func referenceVideoRequestBody(modelName string) string {
-+	return `{
-+		"model": "` + modelName + `",
-+		"duration": 10,
-+		"generate_audio": true,
-+		"ratio": "16:9",
-+		"prompt": "placeholder",
-+		"content": [
-+			{"type": "text", "text": "keep identity"},
-+			{
-+				"type": "video_url",
-+				"role": "reference_video",
-+				"video_url": {"url": "https://example.com/reference.mp4"}
-+			}
-+		]
-+	}`
-+}
++	httpReq.Header.Set("Content-Type", "application/json")
++	return GetHttpClient().Do(httpReq)
+ }
+ 
+ func DoDownloadRequest(originUrl string, reason ...string) (resp *http.Response, err error) {

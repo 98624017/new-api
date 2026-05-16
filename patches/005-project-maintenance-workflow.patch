@@ -1,0 +1,1004 @@
+diff --git a/.github/workflows/docker-image-manual-ghcr.yml b/.github/workflows/docker-image-manual-ghcr.yml
+new file mode 100644
+index 000000000..3097e9dca
+--- /dev/null
++++ b/.github/workflows/docker-image-manual-ghcr.yml
+@@ -0,0 +1,173 @@
++name: Publish Docker image (manual GHCR)
++
++on:
++  workflow_dispatch:
++    inputs:
++      ref:
++        description: "Git ref to build (branch, tag, or commit SHA)"
++        required: false
++        default: "main"
++        type: string
++      push_latest:
++        description: "Also update ghcr latest tag"
++        required: false
++        default: true
++        type: boolean
++      reason:
++        description: "Optional reason for this manual build"
++        required: false
++        type: string
++
++jobs:
++  prepare:
++    name: Prepare build metadata
++    runs-on: ubuntu-latest
++    permissions:
++      contents: read
++    outputs:
++      ref: ${{ steps.prepare.outputs.ref }}
++      tag: ${{ steps.prepare.outputs.tag }}
++      ghcr_repository: ${{ steps.prepare.outputs.ghcr_repository }}
++    steps:
++      - name: Check out target ref
++        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
++        with:
++          fetch-depth: 1
++          ref: ${{ inputs.ref || 'main' }}
++
++      - name: Resolve manual tag
++        id: prepare
++        run: |
++          REF_NAME="${{ inputs.ref || 'main' }}"
++          SHORT_SHA="$(git rev-parse --short HEAD)"
++          TAG="manual-$(date +'%Y%m%d')-${SHORT_SHA}"
++          GHCR_REPOSITORY="${GITHUB_REPOSITORY,,}"
++
++          echo "ref=${REF_NAME}" >> "$GITHUB_OUTPUT"
++          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
++          echo "ghcr_repository=${GHCR_REPOSITORY}" >> "$GITHUB_OUTPUT"
++
++          {
++            echo "### Manual GHCR Docker Build"
++            echo ""
++            echo "- Ref: \`${REF_NAME}\`"
++            echo "- Tag: \`${TAG}\`"
++            echo "- Push latest: \`${{ inputs.push_latest }}\`"
++            if [ -n "${{ inputs.reason }}" ]; then
++              echo "- Reason: ${{ inputs.reason }}"
++            fi
++          } >> "$GITHUB_STEP_SUMMARY"
++
++  build_single_arch:
++    name: Build & push (${{ matrix.arch }}) [GHCR]
++    needs: prepare
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - arch: amd64
++            platform: linux/amd64
++            runner: ubuntu-latest
++          - arch: arm64
++            platform: linux/arm64
++            runner: ubuntu-24.04-arm
++    runs-on: ${{ matrix.runner }}
++    permissions:
++      packages: write
++      contents: read
++      id-token: write
++    steps:
++      - name: Check out target ref
++        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
++        with:
++          fetch-depth: 1
++          ref: ${{ needs.prepare.outputs.ref }}
++
++      - name: Write VERSION for Docker build
++        run: echo "${{ needs.prepare.outputs.tag }}" > VERSION
++
++      - name: Set up Docker Buildx
++        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
++
++      - name: Log in to GHCR
++        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Extract metadata (labels)
++        id: meta
++        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
++        with:
++          images: ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}
++
++      - name: Build & push single-arch image
++        id: build
++        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
++        with:
++          context: .
++          platforms: ${{ matrix.platform }}
++          push: true
++          tags: |
++            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
++          labels: ${{ steps.meta.outputs.labels }}
++          cache-from: type=gha
++          cache-to: type=gha,mode=max
++          provenance: mode=max
++          sbom: true
++
++      - name: Install cosign
++        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
++
++      - name: Sign image with cosign
++        run: cosign sign --yes ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}@${{ steps.build.outputs.digest }}
++
++      - name: Output digest
++        run: |
++          echo "### Docker Image Digest (${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
++          echo '```' >> "$GITHUB_STEP_SUMMARY"
++          echo "ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
++          echo "${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
++          echo '```' >> "$GITHUB_STEP_SUMMARY"
++
++  create_manifests:
++    name: Create multi-arch manifests (GHCR)
++    needs: [prepare, build_single_arch]
++    runs-on: ubuntu-latest
++    permissions:
++      packages: write
++      contents: read
++    steps:
++      - name: Log in to GHCR
++        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Create & push manifest (version)
++        run: |
++          docker buildx imagetools create \
++            -t ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }} \
++            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-amd64 \
++            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-arm64
++
++      - name: Create & push manifest (latest)
++        if: ${{ inputs.push_latest }}
++        run: |
++          docker buildx imagetools create \
++            -t ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest \
++            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-amd64 \
++            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-arm64
++
++      - name: Output manifest digest
++        run: |
++          echo "### Multi-arch Manifest" >> "$GITHUB_STEP_SUMMARY"
++          echo '```' >> "$GITHUB_STEP_SUMMARY"
++          docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }} >> "$GITHUB_STEP_SUMMARY"
++          if [ "${{ inputs.push_latest }}" = "true" ]; then
++            echo "---" >> "$GITHUB_STEP_SUMMARY"
++            docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest >> "$GITHUB_STEP_SUMMARY"
++          fi
++          echo '```' >> "$GITHUB_STEP_SUMMARY"
+diff --git a/.github/workflows/sync-upstream.yml b/.github/workflows/sync-upstream.yml
+new file mode 100644
+index 000000000..41f4067f4
+--- /dev/null
++++ b/.github/workflows/sync-upstream.yml
+@@ -0,0 +1,230 @@
++name: Sync upstream & apply custom patches
++
++on:
++  workflow_dispatch:
++    inputs:
++      upstream_repo:
++        description: '上游仓库地址'
++        required: true
++        default: 'https://github.com/QuantumNous/new-api.git'
++      upstream_branch:
++        description: '上游分支'
++        required: true
++        default: 'main'
++      dry_run:
++        description: '仅测试补丁是否可应用（不推送）'
++        required: true
++        type: boolean
++        default: false
++
++permissions:
++  contents: write
++  pull-requests: write
++
++jobs:
++  sync-and-patch:
++    name: Sync upstream & apply patches
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++          token: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Configure git
++        run: |
++          git config user.name "github-actions[bot]"
++          git config user.email "github-actions[bot]@users.noreply.github.com"
++
++      - name: Add upstream remote
++        run: |
++          git remote add upstream "${{ inputs.upstream_repo }}" || true
++          git fetch upstream "${{ inputs.upstream_branch }}"
++
++      - name: Show upstream diff summary
++        run: |
++          echo "### Upstream commits since last sync:" >> $GITHUB_STEP_SUMMARY
++          echo '```' >> $GITHUB_STEP_SUMMARY
++          git log --oneline HEAD..upstream/${{ inputs.upstream_branch }} | head -30 >> $GITHUB_STEP_SUMMARY
++          echo '```' >> $GITHUB_STEP_SUMMARY
++          COMMIT_COUNT=$(git rev-list --count HEAD..upstream/${{ inputs.upstream_branch }})
++          echo "Total new commits: $COMMIT_COUNT" >> $GITHUB_STEP_SUMMARY
++          echo "::notice::Upstream has $COMMIT_COUNT new commits"
++
++      - name: Stage local patches
++        run: |
++          PATCH_SOURCE_DIR="$RUNNER_TEMP/new-api-patches"
++          mkdir -p "$PATCH_SOURCE_DIR"
++          if [ -d patches ] && [ -n "$(ls patches/*.patch 2>/dev/null)" ]; then
++            cp patches/*.patch "$PATCH_SOURCE_DIR/"
++          fi
++          echo "PATCH_SOURCE_DIR=$PATCH_SOURCE_DIR" >> $GITHUB_ENV
++
++      - name: Create sync branch from upstream
++        run: |
++          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
++          echo "SYNC_BRANCH=$BRANCH" >> $GITHUB_ENV
++          git checkout -B "$BRANCH" "upstream/${{ inputs.upstream_branch }}"
++
++      - name: Collect patch files
++        id: patches
++        run: |
++          if [ ! -d "$PATCH_SOURCE_DIR" ] || [ -z "$(ls "$PATCH_SOURCE_DIR"/*.patch 2>/dev/null)" ]; then
++            echo "::notice::No patch files found in patches/"
++            echo "has_patches=false" >> $GITHUB_OUTPUT
++          else
++            echo "has_patches=true" >> $GITHUB_OUTPUT
++            echo "### Patches to apply:" >> $GITHUB_STEP_SUMMARY
++            for f in "$PATCH_SOURCE_DIR"/*.patch; do
++              echo "- \`$(basename $f)\`" >> $GITHUB_STEP_SUMMARY
++            done
++          fi
++
++      - name: Apply patches
++        if: steps.patches.outputs.has_patches == 'true'
++        run: |
++          FAILED=0
++          APPLIED=0
++          RESULTS=""
++
++          for patch in "$PATCH_SOURCE_DIR"/*.patch; do
++            NAME=$(basename "$patch")
++            echo "--- Applying: $NAME ---"
++
++            # 先尝试直接 apply
++            if git apply --check "$patch" 2>/dev/null; then
++              git apply "$patch"
++              echo "::notice::$NAME applied cleanly"
++              RESULTS="${RESULTS}\n| \`${NAME}\` | ✅ Applied |"
++              APPLIED=$((APPLIED + 1))
++
++            # 再尝试忽略空白差异
++            elif git apply --check --ignore-whitespace "$patch" 2>/dev/null; then
++              git apply --ignore-whitespace "$patch"
++              echo "::warning::$NAME applied with whitespace adjustments"
++              RESULTS="${RESULTS}\n| \`${NAME}\` | ⚠️ Applied (whitespace adjusted) |"
++              APPLIED=$((APPLIED + 1))
++
++            # 最后尝试 3way merge
++            elif git apply --check --3way "$patch" 2>/dev/null; then
++              git apply --3way "$patch"
++              echo "::warning::$NAME applied via 3-way merge"
++              RESULTS="${RESULTS}\n| \`${NAME}\` | ⚠️ Applied (3-way merge) |"
++              APPLIED=$((APPLIED + 1))
++
++            else
++              echo "::error::$NAME FAILED to apply"
++              RESULTS="${RESULTS}\n| \`${NAME}\` | ❌ **FAILED** |"
++              FAILED=$((FAILED + 1))
++              # 输出冲突详情到 summary
++              echo "#### $NAME failure details:" >> $GITHUB_STEP_SUMMARY
++              echo '```' >> $GITHUB_STEP_SUMMARY
++              git apply --stat "$patch" 2>&1 >> $GITHUB_STEP_SUMMARY || true
++              git apply --3way "$patch" 2>&1 >> $GITHUB_STEP_SUMMARY || true
++              echo '```' >> $GITHUB_STEP_SUMMARY
++              git checkout -- . 2>/dev/null || true
++            fi
++          done
++
++          # 写入 summary
++          echo "" >> $GITHUB_STEP_SUMMARY
++          echo "### Patch results ($APPLIED applied, $FAILED failed)" >> $GITHUB_STEP_SUMMARY
++          echo "| Patch | Status |" >> $GITHUB_STEP_SUMMARY
++          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
++          echo -e "$RESULTS" >> $GITHUB_STEP_SUMMARY
++
++          if [ "$FAILED" -gt 0 ]; then
++            echo "::error::$FAILED patch(es) failed. Check summary for details."
++            exit 1
++          fi
++
++      - name: Commit patched changes
++        if: steps.patches.outputs.has_patches == 'true'
++        run: |
++          git add -A
++          # 如果有改动才提交
++          if ! git diff --cached --quiet; then
++            PATCH_LIST="$(for f in "$PATCH_SOURCE_DIR"/*.patch; do basename "$f"; done)"
++            git commit -m "$(cat <<EOF
++          feat: re-apply custom patches after upstream sync
++
++          Patches applied:
++          $PATCH_LIST
++          EOF
++          )"
++          else
++            echo "::notice::No changes after applying patches"
++          fi
++
++      - name: Verify patch registry
++        if: inputs.dry_run == false
++        run: |
++          bash scripts/verify_patches.sh
++
++      - name: Set up Go
++        if: inputs.dry_run == false
++        uses: actions/setup-go@v3
++        with:
++          go-version: '>=1.25.1'
++
++      - name: Verify customizations
++        if: inputs.dry_run == false
++        run: |
++          go mod download
++          echo "### Customization verification" >> $GITHUB_STEP_SUMMARY
++          echo '```bash' >> $GITHUB_STEP_SUMMARY
++          echo "go test ./controller -run '^TestTokenRedeem' -v" >> $GITHUB_STEP_SUMMARY
++          echo "go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v" >> $GITHUB_STEP_SUMMARY
++          echo '```' >> $GITHUB_STEP_SUMMARY
++          go test ./controller -run '^TestTokenRedeem' -v
++          go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
++          echo "### ✅ Customization verification passed" >> $GITHUB_STEP_SUMMARY
++
++      - name: Verify build
++        if: inputs.dry_run == false
++        run: |
++          go build ./...
++          echo "### ✅ Build verification passed" >> $GITHUB_STEP_SUMMARY
++
++      - name: Push branch & create PR
++        if: inputs.dry_run == false
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++        run: |
++          git push -u origin "$SYNC_BRANCH"
++          PATCH_BULLETS="$(for f in "$PATCH_SOURCE_DIR"/*.patch; do echo "- \`$(basename "$f")\`"; done)"
++
++          PR_BODY=$(cat <<'PREOF'
++          ## Upstream Sync
++
++          Synced from `${{ inputs.upstream_repo }}` branch `${{ inputs.upstream_branch }}`.
++
++          ### Custom patches re-applied
++          __PATCH_BULLETS__
++
++          ### Verification
++          - [x] Sync branch created from upstream
++          - [x] Patches applied: all passed
++          - [x] Customization verification: passed
++          - [x] Go build: passed
++
++          > Auto-generated by `sync-upstream.yml` workflow.
++          PREOF
++          )
++          PR_BODY="${PR_BODY/__PATCH_BULLETS__/${PATCH_BULLETS:-"- (none)"}}"
++
++          gh pr create \
++            --title "sync: upstream $(date +%Y-%m-%d)" \
++            --body "$PR_BODY" \
++            --base main \
++            --head "$SYNC_BRANCH"
++
++      - name: Dry run summary
++        if: inputs.dry_run == true
++        run: |
++          echo "### 🧪 Dry run completed" >> $GITHUB_STEP_SUMMARY
++          echo "All patches applied successfully. No changes pushed." >> $GITHUB_STEP_SUMMARY
++          echo "" >> $GITHUB_STEP_SUMMARY
++          echo "To actually sync, re-run this workflow with **dry_run = false**." >> $GITHUB_STEP_SUMMARY
+diff --git a/.gitignore b/.gitignore
+index c17652a21..c10df36a8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,5 +29,6 @@ data/
+ .gomodcache/
+ .gocache-temp
+ .gopath
++graphify-out/
+ 
+-token_estimator_test.go
+\ No newline at end of file
++token_estimator_test.go
+diff --git a/AGENTS.md b/AGENTS.md
+index cd1756d55..65ddc8da3 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -130,3 +130,28 @@ For request structs that are parsed from client JSON and then re-marshaled to up
+   - field absent in client JSON => `nil` => omitted on marshal;
+   - field explicitly set to zero/false => non-`nil` pointer => must still be sent upstream.
+ - Avoid using non-pointer scalars with `omitempty` for optional request parameters, because zero values (`0`, `0.0`, `false`) will be silently dropped during marshal.
++
++### Rule 7: Local Customizations — Keep Patch Files Current
++
++Any change that belongs to a local customization must update the corresponding files before merge:
++
++- Code or tests for an existing customization => update the matching `patches/NNN-*.patch`
++- Behavior, risk, or verification changes => update `docs/customizations/NNN-*.md`
++- New customization => add both `docs/customizations/NNN-*.md` and `patches/NNN-*.patch`, then register it in `docs/customizations/README.md` and `patches/README.md`
++
++Before considering a local customization complete, run:
++
++```bash
++make verify-patches
++```
++
++This verifies that customization docs and patches are paired, and that all `patches/*.patch` can be applied in order to the project-locked upstream base commit.
++
++## graphify
++
++This project has a graphify knowledge graph at graphify-out/.
++
++Rules:
++- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
++- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
++- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+diff --git a/README.md b/README.md
+index 8f23d5dcd..0baeb20f9 100644
+--- a/README.md
++++ b/README.md
+@@ -173,6 +173,22 @@ docker run --name new-api -d --restart always \
+ | ❓ FAQ | [FAQ](https://docs.newapi.pro/en/docs/support/faq) |
+ | 💬 Community Interaction | [Communication Channels](https://docs.newapi.pro/en/docs/support/community-interaction) |
+ 
++### 🔄 Project-Local Upstream Sync Flow
++
++This repository includes a project-local workflow for:
++`fetch upstream -> merge local customizations -> run regression checks -> decide whether to push`.
++
++- Project-local skill: `tools/skills/newapi-upstream-sync/SKILL.md`
++- Local command: `make sync-upstream-local`
++- Sync and push: `PUSH_AFTER_SYNC=1 make sync-upstream-local`
++- Skip tests: `SKIP_TESTS=1 make sync-upstream-local`
++
++Notes:
++
++- This is a **repository-local** workflow, not a global skill
++- It validates the key custom patch regressions and local compatibility fixes by default
++- It stops after local merge and verification unless push is explicitly requested
++
+ ---
+ 
+ ## ✨ Key Features
+diff --git a/README.zh_CN.md b/README.zh_CN.md
+index 92e5baa1d..8e725640c 100644
+--- a/README.zh_CN.md
++++ b/README.zh_CN.md
+@@ -173,6 +173,23 @@ docker run --name new-api -d --restart always \
+ | ❓ 常见问题 | [FAQ](https://docs.newapi.pro/zh/docs/support/faq) |
+ | 💬 社区交流 | [交流渠道](https://docs.newapi.pro/zh/docs/support/community-interaction) |
+ 
++### 🔄 项目内上游同步流程
++
++本仓库已内置一套“拉取 upstream -> 合并二开 -> 跑回归验证 -> 决定是否推送”的项目内流程。
++
++- 项目内 Skill：`tools/skills/newapi-upstream-sync/SKILL.md`
++- 二开补丁校验：`make verify-patches`
++- 本地命令：`make sync-upstream-local`
++- 直接推送：`PUSH_AFTER_SYNC=1 make sync-upstream-local`
++- 跳过测试：`SKIP_TESTS=1 make sync-upstream-local`
++
++说明：
++
++- 这是**本仓库专属**流程，不是全局 Skill
++- 合并二开前先跑 `make verify-patches`，避免忘记更新 `patches/*.patch`
++- 默认会校验关键二开回归和本地上游兼容修复
++- 默认只做到本地合并和验证，通过后再由你决定是否推送
++
+ ---
+ 
+ ## ✨ 主要特性
+diff --git a/makefile b/makefile
+index cbc4ea6ae..b06dcc707 100644
+--- a/makefile
++++ b/makefile
+@@ -1,7 +1,7 @@
+ FRONTEND_DIR = ./web
+ BACKEND_DIR = .
+ 
+-.PHONY: all build-frontend start-backend
++.PHONY: all build-frontend start-backend sync-upstream-local verify-patches
+ 
+ all: build-frontend start-backend
+ 
+@@ -12,3 +12,9 @@ build-frontend:
+ start-backend:
+ 	@echo "Starting backend dev server..."
+ 	@cd $(BACKEND_DIR) && go run main.go &
++
++sync-upstream-local:
++	@bash scripts/sync_upstream_local.sh
++
++verify-patches:
++	@bash scripts/verify_patches.sh
+diff --git a/relay/common/relay_utils.go b/relay/common/relay_utils.go
+index 18df77a64..f16c9b854 100644
+--- a/relay/common/relay_utils.go
++++ b/relay/common/relay_utils.go
+@@ -3,6 +3,7 @@ package common
+ import (
+ 	"fmt"
+ 	"net/http"
++	"net/url"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -80,11 +81,16 @@ func validatePrompt(prompt string) *dto.TaskError {
+ 
+ func validateMultipartTaskRequest(c *gin.Context, info *RelayInfo, action string) (TaskSubmitReq, error) {
+ 	var req TaskSubmitReq
+-	if _, err := c.MultipartForm(); err != nil {
++	// 临时兼容上游 multipart + metadata 回归：
++	// 这里必须先走可复读的 body 缓存解析，否则后续 ValidateBasicTaskRequest
++	// 再调用 UnmarshalBodyReusable 时会遇到原始 Request.Body 已被消费，报 EOF。
++	// 后续如上游官方统一调整这段解析链路，可再按上游实现收口。
++	form, err := common.ParseMultipartFormReusable(c)
++	if err != nil {
+ 		return req, err
+ 	}
+ 
+-	formData := c.Request.PostForm
++	formData := url.Values(form.Value)
+ 	req = TaskSubmitReq{
+ 		Prompt:   formData.Get("prompt"),
+ 		Model:    formData.Get("model"),
+diff --git a/relay/common/relay_utils_test.go b/relay/common/relay_utils_test.go
+new file mode 100644
+index 000000000..b32639ae9
+--- /dev/null
++++ b/relay/common/relay_utils_test.go
+@@ -0,0 +1,59 @@
++package common
++
++import (
++	"bytes"
++	"mime/multipart"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++)
++
++func TestValidateBasicTaskRequest_MultipartWithMetadata(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	body := &bytes.Buffer{}
++	writer := multipart.NewWriter(body)
++	if err := writer.WriteField("prompt", "draw a cat"); err != nil {
++		t.Fatalf("WriteField prompt failed: %v", err)
++	}
++	if err := writer.WriteField("model", "kling-v1"); err != nil {
++		t.Fatalf("WriteField model failed: %v", err)
++	}
++	if err := writer.WriteField("metadata", `{"seed":123,"style":"anime"}`); err != nil {
++		t.Fatalf("WriteField metadata failed: %v", err)
++	}
++	if err := writer.Close(); err != nil {
++		t.Fatalf("Close writer failed: %v", err)
++	}
++
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	req := httptest.NewRequest("POST", "/v1/tasks", body)
++	req.Header.Set("Content-Type", writer.FormDataContentType())
++	c.Request = req
++
++	info := &RelayInfo{TaskRelayInfo: &TaskRelayInfo{}}
++	taskErr := ValidateBasicTaskRequest(c, info, "generate")
++	if taskErr != nil {
++		t.Fatalf("ValidateBasicTaskRequest returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++
++	taskReq, err := GetTaskRequest(c)
++	if err != nil {
++		t.Fatalf("GetTaskRequest failed: %v", err)
++	}
++
++	if taskReq.Prompt != "draw a cat" {
++		t.Fatalf("unexpected prompt: %q", taskReq.Prompt)
++	}
++	if taskReq.Model != "kling-v1" {
++		t.Fatalf("unexpected model: %q", taskReq.Model)
++	}
++
++	if taskReq.Metadata["seed"] != float64(123) {
++		t.Fatalf("unexpected metadata seed: %#v", taskReq.Metadata["seed"])
++	}
++	if taskReq.Metadata["style"] != "anime" {
++		t.Fatalf("unexpected metadata style: %#v", taskReq.Metadata["style"])
++	}
++}
+diff --git a/scripts/sync_upstream_local.sh b/scripts/sync_upstream_local.sh
+new file mode 100755
+index 000000000..edd49632b
+--- /dev/null
++++ b/scripts/sync_upstream_local.sh
+@@ -0,0 +1,119 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
++UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
++TARGET_BRANCH="${TARGET_BRANCH:-$(git branch --show-current)}"
++PUSH_AFTER_SYNC="${PUSH_AFTER_SYNC:-0}"
++SKIP_TESTS="${SKIP_TESTS:-0}"
++ALLOW_DIRTY_SPEC_WORKFLOW="${ALLOW_DIRTY_SPEC_WORKFLOW:-1}"
++
++usage() {
++  cat <<'EOF'
++用法：
++  bash scripts/sync_upstream_local.sh
++
++可选环境变量：
++  UPSTREAM_REMOTE=upstream        上游 remote，默认 upstream
++  UPSTREAM_BRANCH=main            上游分支，默认 main
++  TARGET_BRANCH=main              目标分支，默认当前分支
++  PUSH_AFTER_SYNC=1               验证通过后自动 push
++  SKIP_TESTS=1                    跳过回归测试
++  ALLOW_DIRTY_SPEC_WORKFLOW=0     不忽略 .spec-workflow/ 未跟踪目录
++
++推荐：
++  make sync-upstream-local
++  PUSH_AFTER_SYNC=1 make sync-upstream-local
++EOF
++}
++
++if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
++  usage
++  exit 0
++fi
++
++REPO_ROOT="$(git rev-parse --show-toplevel)"
++cd "$REPO_ROOT"
++
++TMP_STATUS_FILE="$(mktemp)"
++trap 'rm -f "$TMP_STATUS_FILE"' EXIT
++
++git status --porcelain > "$TMP_STATUS_FILE"
++if [[ "$ALLOW_DIRTY_SPEC_WORKFLOW" == "1" ]]; then
++  grep -v '^\?\? \.spec-workflow/$' "$TMP_STATUS_FILE" > "${TMP_STATUS_FILE}.filtered" || true
++  mv "${TMP_STATUS_FILE}.filtered" "$TMP_STATUS_FILE"
++fi
++
++if [[ -s "$TMP_STATUS_FILE" ]]; then
++  echo "检测到未提交改动，先清理工作区后再同步："
++  cat "$TMP_STATUS_FILE"
++  exit 1
++fi
++
++if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
++  echo "未找到上游 remote: $UPSTREAM_REMOTE"
++  exit 1
++fi
++
++if [[ -z "$TARGET_BRANCH" ]]; then
++  echo "无法识别当前分支"
++  exit 1
++fi
++
++echo "==> 切换到目标分支: $TARGET_BRANCH"
++git checkout "$TARGET_BRANCH"
++
++echo "==> 拉取上游最新代码"
++git fetch "$UPSTREAM_REMOTE" --prune
++
++MERGE_TARGET="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++if ! git rev-parse --verify "$MERGE_TARGET" >/dev/null 2>&1; then
++  echo "未找到上游分支: $MERGE_TARGET"
++  exit 1
++fi
++
++echo "==> 计算分叉状态"
++git rev-list --left-right --count "${MERGE_TARGET}...HEAD"
++echo
++git log --oneline --max-count=8 "$MERGE_TARGET"
++echo
++
++BACKUP_BRANCH="backup_upstream_sync_$(date +%Y%m%d_%H%M%S)"
++echo "==> 创建备份分支: $BACKUP_BRANCH"
++git branch "$BACKUP_BRANCH"
++
++echo "==> 合并上游分支: $MERGE_TARGET"
++git merge --no-edit "$MERGE_TARGET"
++
++mkdir -p /tmp/go-build-cache /tmp/go-tmp /tmp/gomodcache
++
++run_test() {
++  local cmd="$1"
++  echo "==> 运行: $cmd"
++  env GOCACHE=/tmp/go-build-cache \
++    GOTMPDIR=/tmp/go-tmp \
++    GOMODCACHE=/tmp/gomodcache \
++    timeout 60s bash -lc "$cmd"
++  echo
++}
++
++if [[ "$SKIP_TESTS" != "1" ]]; then
++  run_test "bash scripts/verify_patches.sh"
++  run_test "go test ./controller -run '^TestTokenRedeem' -v"
++  run_test "go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v"
++  run_test "go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v"
++fi
++
++echo "==> 当前状态"
++git status --short --branch
++echo
++git log --oneline --decorate --max-count=5
++echo
++
++if [[ "$PUSH_AFTER_SYNC" == "1" ]]; then
++  echo "==> 推送到 origin/$TARGET_BRANCH"
++  git push origin "$TARGET_BRANCH"
++else
++  echo "==> 未自动推送。确认无误后手动执行："
++  echo "git push origin $TARGET_BRANCH"
++fi
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+new file mode 100644
+index 000000000..52b6c59f4
+--- /dev/null
++++ b/scripts/verify_patches.sh
+@@ -0,0 +1,105 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
++UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
++PATCH_BASE_REF_DEFAULT="${PATCH_BASE_REF_DEFAULT:-22e509c1efb2260e1537c78684f1a5e9f053b75a}"
++PATCH_BASE_REF="${PATCH_BASE_REF:-${PATCH_BASE_REF_DEFAULT}}"
++ALLOW_UNPATCHED_CHANGES="${ALLOW_UNPATCHED_CHANGES:-0}"
++
++REPO_ROOT="$(git rev-parse --show-toplevel)"
++cd "$REPO_ROOT"
++
++fail() {
++  echo "ERROR: $*" >&2
++  exit 1
++}
++
++info() {
++  echo "==> $*"
++}
++
++mapfile -t PATCH_FILES < <(find patches -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.patch' | sort)
++if [[ "${#PATCH_FILES[@]}" -eq 0 ]]; then
++  fail "patches/ 下没有找到 NNN-*.patch"
++fi
++
++info "校验二开文档与 patch 一一对应"
++for patch in "${PATCH_FILES[@]}"; do
++  base="$(basename "$patch" .patch)"
++  doc="docs/customizations/${base}.md"
++  [[ -f "$doc" ]] || fail "缺少二开说明文档: $doc"
++  grep -Fq "$(basename "$patch")" patches/README.md || fail "patches/README.md 未登记: $(basename "$patch")"
++  grep -Fq "$base" docs/customizations/README.md || fail "docs/customizations/README.md 未登记: $base"
++done
++
++mapfile -t DOC_FILES < <(find docs/customizations -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.md' | sort)
++for doc in "${DOC_FILES[@]}"; do
++  base="$(basename "$doc" .md)"
++  patch="patches/${base}.patch"
++  [[ -f "$patch" ]] || fail "缺少二开补丁文件: $patch"
++done
++
++info "检查当前未提交源码改动是否已同步 patch"
++mapfile -t CHANGED_FILES < <(
++  {
++    git diff --name-only
++    git diff --cached --name-only
++    git ls-files --others --exclude-standard
++  } | sort -u
++)
++
++if [[ "${#CHANGED_FILES[@]}" -gt 0 ]]; then
++  patch_changed=0
++  source_changed=0
++  for file in "${CHANGED_FILES[@]}"; do
++    case "$file" in
++      patches/*.patch)
++        patch_changed=1
++        ;;
++      *.md|docs/*|patches/README.md|AGENTS.md|tools/skills/newapi-upstream-sync/SKILL.md|makefile|scripts/verify_patches.sh|scripts/sync_upstream_local.sh|.github/*|.spec-workflow/*)
++        ;;
++      *)
++        source_changed=1
++        ;;
++    esac
++  done
++
++  if [[ "$source_changed" == "1" && "$patch_changed" != "1" && "$ALLOW_UNPATCHED_CHANGES" != "1" ]]; then
++    fail "检测到源码改动但没有 patch 文件改动。若这是非二开改动，请设置 ALLOW_UNPATCHED_CHANGES=1；否则请先更新 patches/NNN-*.patch"
++  fi
++fi
++
++if ! git rev-parse --verify "$PATCH_BASE_REF" >/dev/null 2>&1; then
++  fail "找不到 patch 基准引用: $PATCH_BASE_REF。请确认当前仓库包含项目锁定的原版 new-api 基准，或显式设置 PATCH_BASE_REF"
++fi
++
++tmp_dir="$(mktemp -d /tmp/newapi-verify-patches-XXXXXX)"
++cleanup() {
++  git worktree remove --force "$tmp_dir" >/dev/null 2>&1 || true
++}
++trap cleanup EXIT
++
++info "在干净基准 ${PATCH_BASE_REF} 上按顺序验证 patch 可应用"
++git worktree add --detach "$tmp_dir" "$PATCH_BASE_REF" >/dev/null
++
++for patch in "${PATCH_FILES[@]}"; do
++  patch_abs="${REPO_ROOT}/${patch}"
++  patch_name="$(basename "$patch")"
++  info "验证 ${patch_name}"
++  (
++    cd "$tmp_dir"
++    if git apply --check "$patch_abs" 2>/dev/null; then
++      git apply "$patch_abs"
++    elif git apply --check --ignore-whitespace "$patch_abs" 2>/dev/null; then
++      git apply --ignore-whitespace "$patch_abs"
++    elif git apply --check --3way "$patch_abs" 2>/dev/null; then
++      git apply --3way "$patch_abs"
++    else
++      git apply --stat "$patch_abs" || true
++      git apply --check "$patch_abs"
++    fi
++  )
++done
++
++info "二开 patch 校验通过"
+diff --git a/tools/skills/newapi-upstream-sync/SKILL.md b/tools/skills/newapi-upstream-sync/SKILL.md
+new file mode 100644
+index 000000000..9761987bc
+--- /dev/null
++++ b/tools/skills/newapi-upstream-sync/SKILL.md
+@@ -0,0 +1,127 @@
++---
++name: newapi-upstream-sync
++description: Use when working inside the new-api repository and the user wants to sync QuantumNous upstream, preserve the local custom patches, run the required regression checks, and then decide whether to push.
++---
++
++# newapi-upstream-sync
++
++## Overview
++
++这是 `new-api` 仓库专用的上游同步技能。
++
++目标是把这类高频操作固定成稳定流程：
++
++1. 拉取 `upstream/main`
++2. 保留本仓库的二开内容
++3. 运行必须的回归验证
++4. 再决定是否提交、推送
++
++## When To Use
++
++仅在当前工作目录是 `new-api` 仓库时使用。
++
++适用场景：
++
++- 用户要求“拉取 upstream 最新代码”
++- 用户要求“合并上游并保留二开 patch”
++- 用户要求“同步 QuantumNous/new-api”
++- 用户想快速完成“拉取 -> 合并 -> 验证 -> 推送”
++
++不适用：
++
++- 当前工作区还有未提交改动且用户没有明确要继续
++- 任务是修 bug、做功能开发，而不是同步上游
++- 当前仓库不是 `new-api`
++
++## Default Flow
++
++优先使用仓库内命令：
++
++```bash
++make sync-upstream-local
++```
++
++需要同步后直接推送时：
++
++```bash
++PUSH_AFTER_SYNC=1 make sync-upstream-local
++```
++
++如需跳过测试：
++
++```bash
++SKIP_TESTS=1 make sync-upstream-local
++```
++
++## What The Command Does
++
++脚本位置：
++
++```bash
++scripts/sync_upstream_local.sh
++```
++
++固定执行这些动作：
++
++1. 检查工作区是否干净
++2. 拉取 `upstream` 最新代码
++3. 创建备份分支 `backup_upstream_sync_时间戳`
++4. 合并 `upstream/main`
++5. 跑二开相关回归测试
++6. 输出 `git status` 和最近提交
++7. 只有在 `PUSH_AFTER_SYNC=1` 时才自动推送
++
++## Required Verification
++
++默认验证以下回归点：
++
++```bash
++make verify-patches
++go test ./controller -run '^TestTokenRedeem' -v
++go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v
++go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v
++```
++
++原因：
++
++- 第 0 组验证二开 patch 登记完整，并能按顺序应用到 `upstream/main`
++- 第 1 组验证 `001-token-redeem-via-apikey`
++- 第 2 组验证 `002-task-refund-restore-token-quota`
++- 第 3 组验证上游 multipart 任务请求回归的本地兼容修复
++
++## Decision Rules
++
++如果合并时出现冲突：
++
++- 先看 `patches/README.md`
++- 再看 `docs/customizations/`
++- 优先保留本仓库已经确认过的二开行为
++- 不要盲目覆盖 upstream 新逻辑，先判断是否是上游 bug
++
++如果测试失败：
++
++- 先确认是二开逻辑失效，还是上游新引入的问题
++- 上游问题优先做最小修复，并加简体中文注释说明“临时兼容上游问题”
++- 修复后重新跑对应回归测试
++
++如果验证通过：
++
++- 默认停在本地，等待用户决定是否推送
++- 只有用户明确要推送，或设置了 `PUSH_AFTER_SYNC=1`，才执行 push
++
++## Reference Files
++
++同步时优先参考这些文件：
++
++```text
++patches/README.md
++docs/customizations/README.md
++.github/workflows/sync-upstream.yml
++```
++
++## Notes
++
++- `.spec-workflow/` 默认允许保持未跟踪状态，不阻塞同步
++- 这个技能假设远端命名仍为 `origin` / `upstream`
++- 如果后续新增 patch，记得同步更新脚本验证清单和本技能内容
++- 修改既有二开时，先更新对应 `patches/NNN-*.patch`，再合并

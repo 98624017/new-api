@@ -145,7 +145,7 @@ Before considering a local customization complete, run:
 make verify-patches
 ```
 
-This verifies that customization docs and patches are paired, and that all `patches/*.patch` can be applied in order to `upstream/main`.
+This verifies that customization docs and patches are paired, and that all `patches/*.patch` can be applied in order to the project-locked upstream base commit.
 
 ## graphify
 

@@ -1,5 +1,5 @@
 diff --git a/common/constants.go b/common/constants.go
-index 6823b2c8..3ad4aaed 100644
+index 6caa7f5c0..13492b70d 100644
 --- a/common/constants.go
 +++ b/common/constants.go
 @@ -75,6 +75,7 @@ var MemoryCacheEnabled bool
@@ -11,10 +11,10 @@ index 6823b2c8..3ad4aaed 100644
  
  var SMTPServer = ""
 diff --git a/common/init.go b/common/init.go
-index e4ddbb45..eb0b99bf 100644
+index e9cfc98bb..55516827c 100644
 --- a/common/init.go
 +++ b/common/init.go
-@@ -83,14 +83,20 @@ func InitEnv() {
+@@ -83,6 +83,7 @@ func InitEnv() {
  	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
  	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
  	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
@@ -22,9 +22,7 @@ index e4ddbb45..eb0b99bf 100644
  	if TLSInsecureSkipVerify {
  		if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {
  			if tr.TLSClientConfig != nil {
- 				tr.TLSClientConfig.InsecureSkipVerify = true
- 			} else {
- 				tr.TLSClientConfig = InsecureTLSConfig
+@@ -92,6 +93,11 @@ func InitEnv() {
  			}
  		}
  	}
@@ -35,11 +33,507 @@ index e4ddbb45..eb0b99bf 100644
 +	}
  
  	// Parse requestInterval and set RequestInterval
+ 	requestInterval, _ = strconv.Atoi(os.Getenv("POLLING_INTERVAL"))
+diff --git a/scripts/mock_video_failure_server.go b/scripts/mock_video_failure_server.go
+new file mode 100644
+index 000000000..9b5f70107
+--- /dev/null
++++ b/scripts/mock_video_failure_server.go
+@@ -0,0 +1,42 @@
++//go:build ignore
++
++package main
++
++import (
++	"flag"
++	"fmt"
++	"net/http"
++	"os"
++	"sync/atomic"
++)
++
++func main() {
++	port := flag.Int("port", 39090, "listen port")
++	taskID := flag.String("task-id", "upstream-video-failure-001", "upstream task id to mock")
++	flag.Parse()
++
++	var hitCount atomic.Int64
++	mux := http.NewServeMux()
++
++	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusOK)
++		_, _ = w.Write([]byte("ok"))
++	})
++
++	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = fmt.Fprintf(w, `{"task_fetch_hits":%d}`, hitCount.Load())
++	})
++
++	mux.HandleFunc("/v1/videos/"+*taskID, func(w http.ResponseWriter, _ *http.Request) {
++		hitCount.Add(1)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = fmt.Fprintf(w, `{"id":"%s","object":"video","status":"failed","progress":100,"error":{"message":"mock upstream failure","code":"mock_failure"}}`, *taskID)
++	})
++
++	addr := fmt.Sprintf("0.0.0.0:%d", *port)
++	if err := http.ListenAndServe(addr, mux); err != nil {
++		fmt.Fprintf(os.Stderr, "mock video failure server failed: %v\n", err)
++		os.Exit(1)
++	}
++}
+diff --git a/scripts/seed_task_refund_fixture.go b/scripts/seed_task_refund_fixture.go
+new file mode 100644
+index 000000000..8a7313609
+--- /dev/null
++++ b/scripts/seed_task_refund_fixture.go
+@@ -0,0 +1,228 @@
++//go:build ignore
++
++package main
++
++import (
++	"flag"
++	"fmt"
++	"os"
++	"strconv"
++	"time"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/glebarez/sqlite"
++	"gorm.io/gorm"
++)
++
++const (
++	fixtureUsername       = "patchuser"
++	fixturePassword       = "Password123"
++	fixtureTokenKey       = "refundtasktoken"
++	fixtureTaskID         = "task_video_refund_acceptance"
++	fixtureUpstreamTaskID = "upstream-video-failure-001"
++	fixtureChannelID      = 1
++	fixtureUserID         = 1
++	fixtureTokenID        = 1
++	fixtureTaskQuota      = 200
++	fixtureUserQuota      = 800
++	fixtureTokenRemain    = 300
++	fixtureTokenUsed      = 200
++	fixtureChannelType    = constant.ChannelTypeSora
++	fixtureOriginModel    = "sora-2"
++)
++
++func main() {
++	mode := flag.String("mode", "seed", "seed or inspect")
++	dbPath := flag.String("db", "", "sqlite database path")
++	baseURL := flag.String("base-url", "", "video task mock server base url")
++	flag.Parse()
++
++	if *dbPath == "" {
++		fmt.Fprintln(os.Stderr, "missing -db")
++		os.Exit(1)
++	}
++
++	db, err := gorm.Open(sqlite.Open(*dbPath), &gorm.Config{})
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "open db failed: %v\n", err)
++		os.Exit(1)
++	}
++
++	if err := ensureSchema(db); err != nil {
++		fmt.Fprintf(os.Stderr, "ensure schema failed: %v\n", err)
++		os.Exit(1)
++	}
++
++	switch *mode {
++	case "seed":
++		if *baseURL == "" {
++			fmt.Fprintln(os.Stderr, "missing -base-url")
++			os.Exit(1)
++		}
++		if err := seedFixture(db, *baseURL); err != nil {
++			fmt.Fprintf(os.Stderr, "seed fixture failed: %v\n", err)
++			os.Exit(1)
++		}
++		fmt.Printf("SEEDED_USER=%s\n", fixtureUsername)
++		fmt.Printf("SEEDED_PASSWORD=%s\n", fixturePassword)
++		fmt.Printf("SEEDED_TOKEN_KEY=sk-%s\n", fixtureTokenKey)
++		fmt.Printf("SEEDED_TASK_ID=%s\n", fixtureTaskID)
++		fmt.Printf("SEEDED_UPSTREAM_TASK_ID=%s\n", fixtureUpstreamTaskID)
++	case "inspect":
++		if err := inspectFixture(db); err != nil {
++			fmt.Fprintf(os.Stderr, "inspect fixture failed: %v\n", err)
++			os.Exit(1)
++		}
++	default:
++		fmt.Fprintf(os.Stderr, "unknown mode: %s\n", *mode)
++		os.Exit(1)
++	}
++}
++
++func ensureSchema(db *gorm.DB) error {
++	common.UsingSQLite = true
++
++	return db.AutoMigrate(
++		&model.Setup{},
++		&model.User{},
++		&model.Token{},
++		&model.Channel{},
++		&model.Task{},
++		&model.Log{},
++	)
++}
++
++func seedFixture(db *gorm.DB, baseURL string) error {
++	common.UsingSQLite = true
++
++	if err := db.Exec("DELETE FROM tasks").Error; err != nil {
++		return err
++	}
++	if err := db.Exec("DELETE FROM tokens").Error; err != nil {
++		return err
++	}
++	if err := db.Exec("DELETE FROM users").Error; err != nil {
++		return err
++	}
++	if err := db.Exec("DELETE FROM logs").Error; err != nil {
++		return err
++	}
++	if err := db.Exec("DELETE FROM channels").Error; err != nil {
++		return err
++	}
++	if err := db.Exec("DELETE FROM setups").Error; err != nil {
++		return err
++	}
++
++	now := time.Now().Unix()
++	passwordHash, err := common.Password2Hash(fixturePassword)
++	if err != nil {
++		return err
++	}
++
++	setup := &model.Setup{
++		ID:            1,
++		Version:       "acceptance",
++		InitializedAt: now,
++	}
++	if err := db.Create(setup).Error; err != nil {
++		return err
++	}
++
++	user := &model.User{
++		Id:          fixtureUserID,
++		Username:    fixtureUsername,
++		Password:    passwordHash,
++		DisplayName: "Patch User",
++		Role:        common.RoleCommonUser,
++		Status:      common.UserStatusEnabled,
++		Group:       "default",
++		Quota:       fixtureUserQuota,
++		AffCode:     "acc1",
++	}
++	if err := db.Create(user).Error; err != nil {
++		return err
++	}
++
++	channel := &model.Channel{
++		Id:      fixtureChannelID,
++		Type:    fixtureChannelType,
++		Name:    "acceptance-video-channel",
++		Key:     "dummy-video-key",
++		Status:  common.ChannelStatusEnabled,
++		Group:   "default",
++		BaseURL: &baseURL,
++	}
++	if err := db.Create(channel).Error; err != nil {
++		return err
++	}
++
++	token := &model.Token{
++		Id:          fixtureTokenID,
++		UserId:      fixtureUserID,
++		Key:         fixtureTokenKey,
++		Name:        "acceptance-token",
++		Status:      common.TokenStatusEnabled,
++		RemainQuota: fixtureTokenRemain,
++		UsedQuota:   fixtureTokenUsed,
++		ExpiredTime: -1,
++	}
++	if err := db.Create(token).Error; err != nil {
++		return err
++	}
++
++	task := &model.Task{
++		TaskID:     fixtureTaskID,
++		Platform:   constant.TaskPlatform(strconv.Itoa(fixtureChannelType)),
++		CreatedAt:  now,
++		UpdatedAt:  now,
++		UserId:     fixtureUserID,
++		Group:      "default",
++		ChannelId:  fixtureChannelID,
++		Quota:      fixtureTaskQuota,
++		Action:     constant.TaskActionGenerate,
++		Status:     model.TaskStatusInProgress,
++		SubmitTime: now,
++		Progress:   "30%",
++		Properties: model.Properties{
++			OriginModelName: fixtureOriginModel,
++		},
++		PrivateData: model.TaskPrivateData{
++			UpstreamTaskID: fixtureUpstreamTaskID,
++			BillingSource:  "wallet",
++			TokenId:        fixtureTokenID,
++			BillingContext: &model.TaskBillingContext{
++				ModelPrice:      0.02,
++				GroupRatio:      1.0,
++				OriginModelName: fixtureOriginModel,
++			},
++		},
++	}
++	return db.Create(task).Error
++}
++
++func inspectFixture(db *gorm.DB) error {
++	var task model.Task
++	if err := db.Where("task_id = ?", fixtureTaskID).First(&task).Error; err != nil {
++		return err
++	}
++
++	var user model.User
++	if err := db.Select("quota").Where("id = ?", fixtureUserID).First(&user).Error; err != nil {
++		return err
++	}
++
++	var token model.Token
++	if err := db.Select("remain_quota", "used_quota").Where("id = ?", fixtureTokenID).First(&token).Error; err != nil {
++		return err
++	}
++
++	fmt.Printf("TASK_STATUS=%s\n", task.Status)
++	fmt.Printf("TASK_FAIL_REASON=%s\n", task.FailReason)
++	fmt.Printf("USER_QUOTA=%d\n", user.Quota)
++	fmt.Printf("TOKEN_REMAIN=%d\n", token.RemainQuota)
++	fmt.Printf("TOKEN_USED=%d\n", token.UsedQuota)
++	return nil
++}
+diff --git a/scripts/verify_task_refund_restore_token_quota.sh b/scripts/verify_task_refund_restore_token_quota.sh
+new file mode 100755
+index 000000000..bf9dd17e1
+--- /dev/null
++++ b/scripts/verify_task_refund_restore_token_quota.sh
+@@ -0,0 +1,207 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++IMAGE="${1:-new-api:verify-20260406}"
++PORT_BASE="${PORT_BASE:-38120}"
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++MOCK_PORT_OFFSET="${MOCK_PORT_OFFSET:-1000}"
++
++cleanup() {
++  if [[ -n "${CURRENT_CID:-}" ]]; then
++    docker rm -f "$CURRENT_CID" >/dev/null 2>&1 || true
++    CURRENT_CID=""
++  fi
++  if [[ -n "${CURRENT_MOCK_PID:-}" ]]; then
++    kill "${CURRENT_MOCK_PID}" >/dev/null 2>&1 || true
++    wait "${CURRENT_MOCK_PID}" >/dev/null 2>&1 || true
++    CURRENT_MOCK_PID=""
++  fi
++  if [[ -n "${CURRENT_DATA_DIR:-}" && -d "${CURRENT_DATA_DIR:-}" ]]; then
++    chmod -R u+w "${CURRENT_DATA_DIR}" >/dev/null 2>&1 || true
++    rm -rf "$CURRENT_DATA_DIR" >/dev/null 2>&1 || true
++    CURRENT_DATA_DIR=""
++  fi
++}
++
++trap cleanup EXIT
++
++extract_json_int() {
++  local pattern="$1"
++  grep -o "\"${pattern}\":[0-9-]*" | head -1 | cut -d: -f2
++}
++
++curl_json_retry() {
++  local url="$1"
++  shift
++  local response status body
++  for _ in $(seq 1 5); do
++    response="$(curl -sS -w $'\n%{http_code}' "$@" "$url")" || {
++      sleep 1
++      continue
++    }
++    status="${response##*$'\n'}"
++    body="${response%$'\n'*}"
++    if [[ "$status" == "200" ]]; then
++      printf "%s" "$body"
++      return 0
++    fi
++    if [[ "$status" == "429" ]]; then
++      sleep 1
++      continue
++    fi
++    echo "$body" >&2
++    return 1
++  done
++  echo "request hit repeated 429: ${url}" >&2
++  return 1
++}
++
++get_wallet_quota() {
++  local port="$1"
++  local cookie="$2"
++  curl_json_retry "http://127.0.0.1:${port}/api/user/self" -b "$cookie" -H 'New-Api-User: 1' | extract_json_int quota
++}
++
++get_token_available() {
++  local port="$1"
++  curl_json_retry "http://127.0.0.1:${port}/api/usage/token/" -H 'Authorization: Bearer sk-refundtasktoken' | extract_json_int total_available
++}
++
++wait_http_ready() {
++  local url="$1"
++  for _ in $(seq 1 30); do
++    if curl -fsS "$url" >/dev/null 2>&1; then
++      return 0
++    fi
++    sleep 1
++  done
++  return 1
++}
++
++run_case() {
++  local restore_flag="$1"
++  local port="$2"
++  local mock_port="$3"
++  local expected_wallet=1000
++  local expected_token=300
++  if [[ "$restore_flag" == "true" ]]; then
++    expected_token=500
++  fi
++
++  CURRENT_DATA_DIR="$(mktemp -d /tmp/new-api-refund-${restore_flag}-XXXXXX)"
++  chmod 0777 "${CURRENT_DATA_DIR}"
++  touch "${CURRENT_DATA_DIR}/verify.db"
++  chmod 0666 "${CURRENT_DATA_DIR}/verify.db"
++  (
++    cd "$ROOT_DIR"
++    go run ./scripts/mock_video_failure_server.go -port "${mock_port}" >"${CURRENT_DATA_DIR}/mock-server.log" 2>&1
++  ) &
++  CURRENT_MOCK_PID=$!
++  wait_http_ready "http://127.0.0.1:${mock_port}/healthz"
++
++  (cd "$ROOT_DIR" && go run ./scripts/seed_task_refund_fixture.go -mode seed -db "${CURRENT_DATA_DIR}/verify.db" -base-url "http://host.docker.internal:${mock_port}") >/dev/null
++  CURRENT_CID="$(docker run -d --rm \
++    --user "$(id -u):$(id -g)" \
++    --add-host host.docker.internal:host-gateway \
++    -p "${port}:3000" \
++    -e SQLITE_PATH='/data/verify.db?_busy_timeout=30000' \
++    -e SESSION_SECRET=verify-refund-${restore_flag} \
++    -e TASK_TIMEOUT_MINUTES=0 \
++    -e TASK_REFUND_RESTORE_TOKEN_QUOTA="${restore_flag}" \
++    -v "${CURRENT_DATA_DIR}:/data" \
++    "${IMAGE}")"
++
++  wait_http_ready "http://127.0.0.1:${port}/api/status"
++
++  local cookie="${CURRENT_DATA_DIR}/user.cookie"
++  curl -fsS -c "$cookie" -X POST "http://127.0.0.1:${port}/api/user/login" \
++    -H "Content-Type: application/json" \
++    --data '{"username":"patchuser","password":"Password123"}' >/dev/null
++
++  local wallet_before token_before task_hits_before
++  wallet_before="$(get_wallet_quota "$port" "$cookie")"
++  token_before="$(get_token_available "$port")"
++  task_hits_before="$(curl -fsS "http://127.0.0.1:${mock_port}/stats" | extract_json_int task_fetch_hits)"
++
++  local wallet_after="" token_after="" task_hits_after="" inspect_out=""
++  for _ in $(seq 1 45); do
++    sleep 1
++    task_hits_after="$(curl -fsS "http://127.0.0.1:${mock_port}/stats" | extract_json_int task_fetch_hits)"
++    if [[ "${task_hits_after:-0}" -ge 1 ]]; then
++      break
++    fi
++  done
++
++  for _ in $(seq 1 10); do
++    wallet_after="$(get_wallet_quota "$port" "$cookie")"
++    token_after="$(get_token_available "$port")"
++    if [[ "$wallet_after" == "$expected_wallet" && "$token_after" == "$expected_token" ]]; then
++      break
++    fi
++    sleep 1
++  done
++
++  if [[ "$wallet_before" != "800" ]]; then
++    echo "unexpected wallet_before: ${wallet_before}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    return 1
++  fi
++  if [[ "$token_before" != "300" ]]; then
++    echo "unexpected token_before: ${token_before}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    return 1
++  fi
++  if [[ "${task_hits_before}" != "0" ]]; then
++    echo "unexpected task_hits_before: ${task_hits_before}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    cat "${CURRENT_DATA_DIR}/mock-server.log" >&2 || true
++    return 1
++  fi
++  if [[ "$wallet_after" != "$expected_wallet" ]]; then
++    echo "wallet_after mismatch, expect ${expected_wallet}, got ${wallet_after}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    return 1
++  fi
++  if [[ "$token_after" != "$expected_token" ]]; then
++    echo "token_after mismatch, expect ${expected_token}, got ${token_after}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    return 1
++  fi
++  if [[ "${task_hits_after:-0}" -lt 1 ]]; then
++    echo "video polling did not hit mock upstream, task_hits_after=${task_hits_after:-0}" >&2
++    docker logs "$CURRENT_CID" >&2 || true
++    cat "${CURRENT_DATA_DIR}/mock-server.log" >&2 || true
++    return 1
++  fi
++
++  docker rm -f "$CURRENT_CID" >/dev/null 2>&1 || true
++  CURRENT_CID=""
++  if [[ -n "${CURRENT_MOCK_PID:-}" ]]; then
++    kill "${CURRENT_MOCK_PID}" >/dev/null 2>&1 || true
++    wait "${CURRENT_MOCK_PID}" >/dev/null 2>&1 || true
++    CURRENT_MOCK_PID=""
++  fi
++
++  inspect_out="$(cd "$ROOT_DIR" && go run ./scripts/seed_task_refund_fixture.go -mode inspect -db "${CURRENT_DATA_DIR}/verify.db")"
++  local task_status
++  task_status="$(printf "%s\n" "$inspect_out" | awk -F= '/^TASK_STATUS=/{print $2}')"
++
++  echo "CASE=${restore_flag}"
++  echo "wallet_before=${wallet_before}"
++  echo "wallet_after=${wallet_after}"
++  echo "token_before=${token_before}"
++  echo "token_after=${token_after}"
++  echo "task_hits_after=${task_hits_after}"
++  printf "%s\n" "$inspect_out"
++
++  if [[ "$task_status" != "FAILURE" ]]; then
++    echo "task status mismatch, expect FAILURE, got ${task_status}" >&2
++    return 1
++  fi
++
++  rm -rf "$CURRENT_DATA_DIR" >/dev/null 2>&1 || true
++  CURRENT_DATA_DIR=""
++}
++
++run_case false "${PORT_BASE}" "$((PORT_BASE + MOCK_PORT_OFFSET))"
++run_case true "$((PORT_BASE + 1))" "$((PORT_BASE + MOCK_PORT_OFFSET + 1))"
 diff --git a/service/task_billing.go b/service/task_billing.go
-index 0da4cf43..c89b5003 100644
+index 6cf7a965c..d0ff4ee3b 100644
 --- a/service/task_billing.go
 +++ b/service/task_billing.go
-@@ -141,7 +141,8 @@ func taskModelName(task *model.Task) string {
+@@ -148,7 +148,8 @@ func taskModelName(task *model.Task) string {
  }
  
  // RefundTaskQuota 统一的任务失败退款逻辑。
@@ -49,7 +543,7 @@ index 0da4cf43..c89b5003 100644
  func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
  	quota := task.Quota
  	if quota == 0 {
-@@ -154,13 +155,16 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+@@ -161,13 +162,16 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
  		return
  	}
  
@@ -69,10 +563,49 @@ index 0da4cf43..c89b5003 100644
  		UserId:    task.UserId,
  		LogType:   model.LogTypeRefund,
 diff --git a/service/task_billing_test.go b/service/task_billing_test.go
-index 1145bba5..fda29322 100644
+index 79c8c49eb..1d99d41b1 100644
 --- a/service/task_billing_test.go
 +++ b/service/task_billing_test.go
-@@ -182,6 +182,15 @@ func countLogs(t *testing.T) int64 {
+@@ -3,12 +3,17 @@ package service
+ import (
+ 	"context"
+ 	"encoding/json"
++	"io"
+ 	"net/http"
+ 	"os"
++	"strconv"
++	"strings"
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/model"
+ 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+ 	"github.com/glebarez/sqlite"
+@@ -106,6 +111,20 @@ func seedChannel(t *testing.T, id int) {
+ 	require.NoError(t, model.DB.Create(ch).Error)
+ }
+ 
++func seedVideoChannel(t *testing.T, id int, channelType int, baseURL string) {
++	t.Helper()
++	ch := &model.Channel{
++		Id:      id,
++		Name:    "test_video_channel",
++		Type:    channelType,
++		Key:     "sk-video-test",
++		Status:  common.ChannelStatusEnabled,
++		Group:   "default",
++		BaseURL: &baseURL,
++	}
++	require.NoError(t, model.DB.Create(ch).Error)
++}
++
+ func makeTask(userId, channelId, quota, tokenId int, billingSource string, subscriptionId int) *model.Task {
+ 	return &model.Task{
+ 		TaskID:    "task_" + time.Now().Format("150405.000"),
+@@ -182,6 +201,15 @@ func countLogs(t *testing.T) int64 {
  	return count
  }
  
@@ -88,7 +621,7 @@ index 1145bba5..fda29322 100644
  // ===========================================================================
  // RefundTaskQuota tests
  // ===========================================================================
-@@ -189,6 +198,7 @@ func countLogs(t *testing.T) int64 {
+@@ -189,6 +217,7 @@ func countLogs(t *testing.T) int64 {
  func TestRefundTaskQuota_Wallet(t *testing.T) {
  	truncate(t)
  	ctx := context.Background()
@@ -96,7 +629,7 @@ index 1145bba5..fda29322 100644
  
  	const userID, tokenID, channelID = 1, 1, 1
  	const initQuota, preConsumed = 10000, 3000
-@@ -205,9 +215,9 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
+@@ -205,9 +234,9 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
  	// User quota should increase by preConsumed
  	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
  
@@ -109,7 +642,7 @@ index 1145bba5..fda29322 100644
  
  	// A refund log should be created
  	log := getLastLog(t)
-@@ -217,9 +227,32 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
+@@ -217,9 +246,32 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
  	assert.Equal(t, "test-model", log.ModelName)
  }
  
@@ -142,7 +675,7 @@ index 1145bba5..fda29322 100644
  
  	const userID, tokenID, channelID, subID = 2, 2, 2, 1
  	const preConsumed = 2000
-@@ -484,6 +517,7 @@ func simulatePollBilling(ctx context.Context, task *model.Task, newStatus model.
+@@ -484,6 +536,7 @@ func simulatePollBilling(ctx context.Context, task *model.Task, newStatus model.
  func TestCASGuardedRefund_Win(t *testing.T) {
  	truncate(t)
  	ctx := context.Background()
@@ -150,7 +683,7 @@ index 1145bba5..fda29322 100644
  
  	const userID, tokenID, channelID = 20, 20, 20
  	const initQuota, preConsumed = 10000, 4000
-@@ -506,7 +540,7 @@ func TestCASGuardedRefund_Win(t *testing.T) {
+@@ -506,7 +559,7 @@ func TestCASGuardedRefund_Win(t *testing.T) {
  
  	// Refund should have happened
  	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
@@ -159,3 +692,112 @@ index 1145bba5..fda29322 100644
  
  	log := getLastLog(t)
  	require.NotNil(t, log)
+@@ -607,6 +660,74 @@ func TestNonTerminalUpdate_NoBilling(t *testing.T) {
+ 	assert.Equal(t, "50%", reloaded.Progress)
+ }
+ 
++func TestUpdateVideoTasks_FailureRefund(t *testing.T) {
++	truncate(t)
++	ctx := context.Background()
++
++	const userID, tokenID, channelID = 24, 24, 24
++	const initQuota, preConsumed = 10000, 4000
++	const tokenRemain = 6000
++	const upstreamTaskID = "upstream-video-failure-001"
++	const publicTaskID = "task_video_refund_acceptance"
++
++	var hitCount atomic.Int32
++	oldFactory := GetTaskAdaptorFunc
++	GetTaskAdaptorFunc = func(platform constant.TaskPlatform) TaskPollingAdaptor {
++		return &mockVideoFailureAdaptor{
++			hitCount: &hitCount,
++		}
++	}
++	defer func() {
++		GetTaskAdaptorFunc = oldFactory
++	}()
++
++	for _, tc := range []struct {
++		name                string
++		restoreTokenQuota   bool
++		expectedRemainQuota int
++	}{
++		{name: "restore disabled", restoreTokenQuota: false, expectedRemainQuota: tokenRemain},
++		{name: "restore enabled", restoreTokenQuota: true, expectedRemainQuota: tokenRemain + preConsumed},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			truncate(t)
++			setRestoreTokenQuotaOnRefund(t, tc.restoreTokenQuota)
++			hitCount.Store(0)
++
++			seedUser(t, userID, initQuota)
++			seedToken(t, tokenID, userID, "sk-video-refund", tokenRemain)
++			seedVideoChannel(t, channelID, constant.ChannelTypeSora, "http://mock-video.test")
++
++			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
++			task.TaskID = publicTaskID
++			task.Platform = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeSora))
++			task.Action = constant.TaskActionGenerate
++			task.Status = model.TaskStatusInProgress
++			task.Progress = "30%"
++			task.SubmitTime = time.Now().Unix()
++			task.PrivateData.UpstreamTaskID = upstreamTaskID
++			require.NoError(t, model.DB.Create(task).Error)
++
++			taskM := map[string]*model.Task{
++				task.GetUpstreamTaskID(): task,
++			}
++			taskChannelM := map[int][]string{
++				channelID: []string{task.GetUpstreamTaskID()},
++			}
++
++			require.NoError(t, UpdateVideoTasks(ctx, task.Platform, taskChannelM, taskM))
++
++			var reloaded model.Task
++			require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
++			assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
++			assert.Equal(t, "mock upstream failure", reloaded.FailReason)
++			assert.Equal(t, int32(1), hitCount.Load())
++			assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
++			assert.Equal(t, tc.expectedRemainQuota, getTokenRemainQuota(t, tokenID))
++		})
++	}
++}
++
+ // ===========================================================================
+ // Mock adaptor for settleTaskBillingOnComplete tests
+ // ===========================================================================
+@@ -624,6 +745,33 @@ func (m *mockAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.Task
+ 	return m.adjustReturn
+ }
+ 
++type mockVideoFailureAdaptor struct {
++	hitCount *atomic.Int32
++}
++
++func (m *mockVideoFailureAdaptor) Init(_ *relaycommon.RelayInfo) {}
++func (m *mockVideoFailureAdaptor) FetchTask(string, string, map[string]any, string) (*http.Response, error) {
++	if m.hitCount != nil {
++		m.hitCount.Add(1)
++	}
++	body := `{"id":"upstream-video-failure-001","object":"video","status":"failed","progress":100,"error":{"message":"mock upstream failure","code":"mock_failure"}}`
++	return &http.Response{
++		StatusCode: http.StatusOK,
++		Body:       io.NopCloser(strings.NewReader(body)),
++		Header:     make(http.Header),
++	}, nil
++}
++func (m *mockVideoFailureAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) {
++	return &relaycommon.TaskInfo{
++		Status:   model.TaskStatusFailure,
++		Reason:   "mock upstream failure",
++		Progress: "100%",
++	}, nil
++}
++func (m *mockVideoFailureAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
++	return 0
++}
++
+ // ===========================================================================
+ // PerCallBilling tests — settleTaskBillingOnComplete
+ // ===========================================================================

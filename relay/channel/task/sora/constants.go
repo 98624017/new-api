@@ -16,19 +16,28 @@ var ChannelName = "sora"
 var (
 	referenceVideoDoublePriceModelsMu sync.RWMutex
 	ReferenceVideoDoublePriceModels   = map[string]bool{}
+	referenceVideoDurationBilling     bool
 )
 
 func ReloadReferenceVideoDoublePriceModelsFromEnv() {
 	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
+	durationBilling := parseReferenceVideoDurationBillingEnabled(os.Getenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED"))
 	referenceVideoDoublePriceModelsMu.Lock()
 	defer referenceVideoDoublePriceModelsMu.Unlock()
 	ReferenceVideoDoublePriceModels = models
+	referenceVideoDurationBilling = durationBilling
 }
 
 func IsReferenceVideoDoublePriceModel(modelName string) bool {
 	referenceVideoDoublePriceModelsMu.RLock()
 	defer referenceVideoDoublePriceModelsMu.RUnlock()
 	return ReferenceVideoDoublePriceModels[modelName]
+}
+
+func ReferenceVideoDurationBillingEnabled() bool {
+	referenceVideoDoublePriceModelsMu.RLock()
+	defer referenceVideoDoublePriceModelsMu.RUnlock()
+	return referenceVideoDurationBilling
 }
 
 func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
@@ -41,4 +50,13 @@ func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
 		models[model] = true
 	}
 	return models
+}
+
+func parseReferenceVideoDurationBillingEnabled(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

@@ -18,17 +18,11 @@
 
 ## 当前二开清单
 
-### 001-token-redeem-via-apikey
+### 001-api-key-self-service
 
-- 目标：允许通过 API Key (`Bearer sk-xxx`) 直接兑换兑换码，并在充值日志中记录兑换到的 token/key 名称
-- 影响范围：兑换接口、Token 认证链路、充值使用记录
-- 关联文件：
-  - `controller/token_test.go`
-  - `controller/user.go`
-  - `controller/user_token_redeem_test.go`
-  - `model/redemption.go`
-  - `router/api-router.go`
-  - `patches/001-token-redeem-via-apikey.patch`
+- 目标：允许通过 API Key (`Bearer sk-xxx`) 兑换兑换码，并免登录查询当前 key 创建的异步任务列表
+- 影响范围：兑换接口、Token 认证链路、充值使用记录、任务列表接口、任务落库字段、新任务 token 维度查询
+- 当前状态：由原 `001-token-redeem-via-apikey` 和 `005-task-list-via-apikey` 合并，已生成 `patches/001-api-key-self-service.patch`
 
 ### 002-task-refund-restore-token-quota
 
@@ -44,15 +38,21 @@
 
 ### 004-sora-reference-video-double-price
 
-- 目标：Sora 兼容 `/v1/videos` 请求中，环境变量白名单模型携带参考视频时按双倍计价
-- 影响范围：异步视频任务请求解析、Sora 任务计费估算、任务 `OtherRatios`
+- 目标：Sora 兼容 `/v1/videos` 请求中，环境变量白名单模型携带参考视频时按“生成时长 + 参考视频总时长”计价
+- 影响范围：异步视频任务请求解析、参考视频时长检测、Sora 任务计费估算、任务 `OtherRatios`
 - 当前状态：已实现，并已生成 `patches/004-sora-reference-video-double-price.patch`
 
-### 005-task-list-via-apikey
+### 005-project-maintenance-workflow
 
-- 目标：允许通过 API Key (`Bearer sk-xxx`) 免登录查询“当前 key 创建的异步任务列表 / task_id”
-- 影响范围：任务列表接口、任务落库字段、新任务 token 维度查询
-- 当前状态：已实现，并已生成 `patches/005-task-list-via-apikey.patch`
+- 目标：保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等项目维护差异
+- 影响范围：CI workflow、README、AGENTS、makefile、同步脚本、补丁校验脚本、relay multipart 工具函数
+- 当前状态：已实现，并已生成 `patches/005-project-maintenance-workflow.patch`
+
+### 006-frontend-lock
+
+- 目标：通过 `FRONTEND_LOCK_PASSWORD` 为前端页面增加弱隐藏锁屏，输入密码后进入原页面
+- 影响范围：Go 启动时 HTML 注入、React 根渲染、锁屏公告展示
+- 当前状态：已实现，并已生成 `patches/006-frontend-lock.patch`
 
 ## 上游同步标准流程
 
@@ -74,10 +74,15 @@
 
 ```bash
 make verify-patches
-go test ./controller -run '^TestTokenRedeem' -v
 go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
 go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 go test ./common -run TestMaskBillingAmountsForClient -count=1
 go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
+go test ./relay/channel/task/sora ./relay/common -count=1
+go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
+go test . -run TestInjectFrontendLockPassword -count=1
+(cd web && bun run build)
 go build ./...
 ```
+
+默认 patch 校验基准是当前项目锁定的原版 new-api：`22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。验证其他上游基准时显式设置 `PATCH_BASE_REF`。
