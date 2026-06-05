@@ -160,8 +160,7 @@ func TestEstimateBillingDoesNotProbeReferenceVideoWhenEnvDoesNotListModel(t *tes
 
 func TestEstimateBillingDoublePriceForSeedanceOpenAIVideosReferenceVideo(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -181,8 +180,7 @@ func TestEstimateBillingDoublePriceForSeedanceOpenAIVideosReferenceVideo(t *test
 
 func TestEstimateBillingDoesNotDoublePriceSeedanceNonVideoFiles(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -201,7 +199,6 @@ func TestEstimateBillingDoesNotDoublePriceSeedanceNonVideoFiles(t *testing.T) {
 func TestEstimateBillingDoesNotDoublePriceSeedanceWhenModelNotWhitelisted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -219,7 +216,6 @@ func TestEstimateBillingDoesNotDoublePriceSeedanceWhenModelNotWhitelisted(t *tes
 
 func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
@@ -242,15 +238,14 @@ func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
 	}
 }
 
-func TestReferenceVideoDoublePriceModelsIncludeSeedanceEnv(t *testing.T) {
-	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+func TestReferenceVideoDoublePriceModelsIncludeSeedanceModelsInSoraEnv(t *testing.T) {
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
 
 	if !IsReferenceVideoDoublePriceModel("doubao-seedance-2-0-260128-2") {
-		t.Fatal("expected seedance env whitelist to load into sora task billing models")
+		t.Fatal("expected seedance model in sora env whitelist to load into task billing models")
 	}
 }
 

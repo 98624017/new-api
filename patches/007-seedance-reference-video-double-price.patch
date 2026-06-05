@@ -105,26 +105,12 @@ index 97ef376..da4cdf0 100644
  func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
  	if info.Action == constant.TaskActionRemix {
  		return fmt.Sprintf("%s/v1/videos/%s/remix", a.baseURL, info.OriginTaskID), nil
-diff --git a/relay/channel/task/sora/constants.go b/relay/channel/task/sora/constants.go
-index b6a0a45..f5f9892 100644
---- a/relay/channel/task/sora/constants.go
-+++ b/relay/channel/task/sora/constants.go
-@@ -21,6 +21,9 @@ var (
- 
- func ReloadReferenceVideoDoublePriceModelsFromEnv() {
- 	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
-+	for model := range parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS")) {
-+		models[model] = true
-+	}
- 	durationBilling := parseReferenceVideoDurationBillingEnabled(os.Getenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED"))
- 	referenceVideoDoublePriceModelsMu.Lock()
- 	defer referenceVideoDoublePriceModelsMu.Unlock()
 diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
 new file mode 100644
-index 0000000..2f44b5f
+index 0000000..bd63918
 --- /dev/null
 +++ b/relay/channel/task/sora/adaptor_test.go
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,442 @@
 +package sora
 +
 +import (
@@ -287,8 +273,7 @@ index 0000000..2f44b5f
 +
 +func TestEstimateBillingDoublePriceForSeedanceOpenAIVideosReferenceVideo(t *testing.T) {
 +	gin.SetMode(gin.TestMode)
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 +	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 +	ReloadReferenceVideoDoublePriceModelsFromEnv()
 +	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -308,8 +293,7 @@ index 0000000..2f44b5f
 +
 +func TestEstimateBillingDoesNotDoublePriceSeedanceNonVideoFiles(t *testing.T) {
 +	gin.SetMode(gin.TestMode)
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 +	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 +	ReloadReferenceVideoDoublePriceModelsFromEnv()
 +	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -328,7 +312,6 @@ index 0000000..2f44b5f
 +func TestEstimateBillingDoesNotDoublePriceSeedanceWhenModelNotWhitelisted(t *testing.T) {
 +	gin.SetMode(gin.TestMode)
 +	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
 +	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 +	ReloadReferenceVideoDoublePriceModelsFromEnv()
 +	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
@@ -346,7 +329,6 @@ index 0000000..2f44b5f
 +
 +func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
 +	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
 +	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 +	ReloadReferenceVideoDoublePriceModelsFromEnv()
 +	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
@@ -369,15 +351,14 @@ index 0000000..2f44b5f
 +	}
 +}
 +
-+func TestReferenceVideoDoublePriceModelsIncludeSeedanceEnv(t *testing.T) {
-+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++func TestReferenceVideoDoublePriceModelsIncludeSeedanceModelsInSoraEnv(t *testing.T) {
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
 +	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 +	ReloadReferenceVideoDoublePriceModelsFromEnv()
 +	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
 +
 +	if !IsReferenceVideoDoublePriceModel("doubao-seedance-2-0-260128-2") {
-+		t.Fatal("expected seedance env whitelist to load into sora task billing models")
++		t.Fatal("expected seedance model in sora env whitelist to load into task billing models")
 +	}
 +}
 +
@@ -674,7 +655,7 @@ index 0000000..c752502
 +默认 patch 校验基准是当前项目锁定的原版 new-api：`22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。验证其他上游基准时显式设置 `PATCH_BASE_REF`。
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000..42ea488
+index 0000000..9dcacbc
 --- /dev/null
 +++ b/patches/README.md
 @@ -0,0 +1,441 @@
@@ -1083,7 +1064,7 @@ index 0000000..42ea488
 +
 +### 1. `relay/channel/task/sora/constants.go`
 +
-+将 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 合并到 Sora 参考视频双倍计费白名单。默认白名单为空。
++继续使用 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 作为统一白名单；Seedance 模型名也配置在该变量中。默认白名单为空。
 +
 +### 2. `relay/channel/task/sora/adaptor.go`
 +
@@ -1121,10 +1102,10 @@ index 0000000..42ea488
 +3. **更新上游后**：先 `git apply`，失败则按文档手动改，最后 `git diff > patches/NNN-xxx.patch` 更新补丁文件
 diff --git a/docs/customizations/007-seedance-reference-video-double-price.md b/docs/customizations/007-seedance-reference-video-double-price.md
 new file mode 100644
-index 0000000..1a5c188
+index 0000000..da0a22f
 --- /dev/null
 +++ b/docs/customizations/007-seedance-reference-video-double-price.md
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,112 @@
 +# 007-seedance-reference-video-double-price
 +
 +## 1. 背景
@@ -1161,14 +1142,13 @@ index 0000000..1a5c188
 +
 +## 3. 业务规则
 +
-+- Seedance 模型白名单环境变量：`SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS`
-+- 该变量会并入 Sora 任务适配器的参考视频双倍计费白名单
-+- 原 Sora 白名单 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 继续生效
++- 模型白名单环境变量统一使用：`SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS`
++- Seedance 模型名直接配置到该变量中，不再使用单独的 Seedance 白名单变量
 +- 模型白名单默认值为空，不配置时任何 Seedance 模型都不会触发本定制双倍计费
 +- 多个模型用英文逗号分隔，例如：
 +
 +```bash
-+SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS=doubao-seedance-2-0-260128-2,doubao-seedance-2-0-260128-3
++SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS=doubao-seedance-2-0-260128-2,doubao-seedance-2-0-260128-3
 +```
 +
 +- 请求模型不在白名单内时，即使包含参考视频也不按本定制双倍计费
@@ -1186,7 +1166,7 @@ index 0000000..1a5c188
 +## 4. 影响范围
 +
 +- `relay/channel/task/sora/constants.go`
-+  - 从 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 加载 Seedance 模型白名单，并合并到 Sora 参考视频计费白名单
++  - 继续从 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 加载参考视频计费白名单，Seedance 模型名也配置在该变量中
 +- `relay/channel/task/sora/adaptor.go`
 +  - 在 `EstimateBilling` 中识别白名单模型和 OpenAI Videos 顶层参考视频字段
 +  - 命中顶层参考视频时返回 `video_input: 2`

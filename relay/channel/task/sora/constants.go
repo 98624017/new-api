@@ -21,9 +21,6 @@ var (
 
 func ReloadReferenceVideoDoublePriceModelsFromEnv() {
 	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
-	for model := range parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS")) {
-		models[model] = true
-	}
 	durationBilling := parseReferenceVideoDurationBillingEnabled(os.Getenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED"))
 	referenceVideoDoublePriceModelsMu.Lock()
 	defer referenceVideoDoublePriceModelsMu.Unlock()

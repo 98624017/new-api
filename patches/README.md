@@ -403,7 +403,7 @@ make verify-patches
 
 ### 1. `relay/channel/task/sora/constants.go`
 
-将 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 合并到 Sora 参考视频双倍计费白名单。默认白名单为空。
+继续使用 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 作为统一白名单；Seedance 模型名也配置在该变量中。默认白名单为空。
 
 ### 2. `relay/channel/task/sora/adaptor.go`
 
