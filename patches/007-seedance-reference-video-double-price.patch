@@ -1,0 +1,1219 @@
+diff --git a/main.go b/main.go
+index 1b6ecfda5..ebcd53788 100644
+--- a/main.go
++++ b/main.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/oauth"
+ 	"github.com/QuantumNous/new-api/relay"
++	doubaotask "github.com/QuantumNous/new-api/relay/channel/task/doubao"
+ 	soratask "github.com/QuantumNous/new-api/relay/channel/task/sora"
+ 	"github.com/QuantumNous/new-api/router"
+ 	"github.com/QuantumNous/new-api/service"
+@@ -274,6 +275,7 @@ func InitResources() error {
+ 
+ 	// 加载环境变量
+ 	common.InitEnv()
++	doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()
+ 	soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()
+ 
+ 	logger.SetupLogger()
+diff --git a/relay/channel/task/doubao/adaptor.go b/relay/channel/task/doubao/adaptor.go
+index a6dabb5f1..b0760875c 100644
+--- a/relay/channel/task/doubao/adaptor.go
++++ b/relay/channel/task/doubao/adaptor.go
+@@ -5,7 +5,9 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"path"
+ 	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+@@ -108,11 +110,19 @@ type TaskAdaptor struct {
+ }
+ 
+ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
+-	a.ChannelType = info.ChannelType
+-	a.baseURL = info.ChannelBaseUrl
++	if info.ChannelMeta != nil && info.ChannelMeta.ChannelType != 0 {
++		a.ChannelType = info.ChannelMeta.ChannelType
++	}
++	if info.ChannelMeta != nil && info.ChannelMeta.ChannelBaseUrl != "" {
++		a.baseURL = info.ChannelMeta.ChannelBaseUrl
++	}
+ 	a.apiKey = info.ApiKey
+ }
+ 
++func (a *TaskAdaptor) isSeedanceOpenAIVideosChannel() bool {
++	return a.ChannelType == constant.ChannelTypeDoubaoVideo
++}
++
+ // ValidateRequestAndSetAction parses body, validates fields and sets default action.
+ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
+ 	// Accept only POST /v1/video/generations as "generate" action.
+@@ -121,6 +131,9 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
+ 
+ // BuildRequestURL constructs the upstream URL.
+ func (a *TaskAdaptor) BuildRequestURL(_ *relaycommon.RelayInfo) (string, error) {
++	if a.isSeedanceOpenAIVideosChannel() {
++		return fmt.Sprintf("%s/v1/videos", a.baseURL), nil
++	}
+ 	return fmt.Sprintf("%s/api/v3/contents/generations/tasks", a.baseURL), nil
+ }
+ 
+@@ -138,14 +151,91 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+ 	if err != nil {
+ 		return nil
+ 	}
+-	if hasVideoInMetadata(req.Metadata) {
+-		if ratio, ok := GetVideoInputRatio(info.OriginModelName); ok {
++	modelName := info.OriginModelName
++	if modelName == "" {
++		modelName = req.Model
++	}
++	hasMetadataVideo := hasVideoInMetadata(req.Metadata)
++	hasOpenAIVideosReferenceVideo := a.isSeedanceOpenAIVideosChannel() && hasReferenceVideoInOpenAIVideosRequest(c)
++	if IsReferenceVideoDoublePriceModel(modelName) && (hasOpenAIVideosReferenceVideo || hasMetadataVideo) {
++		return map[string]float64{"video_input": 2}
++	}
++	if hasMetadataVideo {
++		if ratio, ok := GetVideoInputRatio(modelName); ok {
+ 			return map[string]float64{"video_input": ratio}
+ 		}
+ 	}
+ 	return nil
+ }
+ 
++func hasReferenceVideoInOpenAIVideosRequest(c *gin.Context) bool {
++	var body map[string]interface{}
++	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
++		return false
++	}
++	for _, field := range []string{"input_video", "video_url", "reference_video"} {
++		if hasNonEmptyURLValue(body[field]) {
++			return true
++		}
++	}
++	return hasVideoURLValue(body["files"])
++}
++
++func hasNonEmptyURLValue(value interface{}) bool {
++	switch v := value.(type) {
++	case string:
++		return strings.TrimSpace(v) != ""
++	case []interface{}:
++		for _, item := range v {
++			if hasNonEmptyURLValue(item) {
++				return true
++			}
++		}
++	case []string:
++		for _, item := range v {
++			if hasNonEmptyURLValue(item) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func hasVideoURLValue(value interface{}) bool {
++	switch v := value.(type) {
++	case string:
++		return isVideoReferenceURL(v)
++	case []interface{}:
++		for _, item := range v {
++			if hasVideoURLValue(item) {
++				return true
++			}
++		}
++	case []string:
++		for _, item := range v {
++			if hasVideoURLValue(item) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func isVideoReferenceURL(raw string) bool {
++	raw = strings.TrimSpace(raw)
++	if raw == "" {
++		return false
++	}
++	base := path.Base(strings.Split(raw, "?")[0])
++	ext := strings.ToLower(path.Ext(base))
++	switch ext {
++	case ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg":
++		return true
++	default:
++		return false
++	}
++}
++
+ // hasVideoInMetadata 直接检查 metadata 的 content 数组是否包含 video_url 条目，
+ // 避免构建完整的上游 requestPayload。
+ func hasVideoInMetadata(metadata map[string]interface{}) bool {
+@@ -182,6 +272,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
+ 		return nil, err
+ 	}
+ 
++	if a.isSeedanceOpenAIVideosChannel() {
++		return a.buildSeedanceOpenAIVideosRequestBody(c, info, req)
++	}
++
+ 	body, err := a.convertToRequestPayload(&req)
+ 	if err != nil {
+ 		return nil, errors.Wrap(err, "convert request payload failed")
+@@ -198,6 +292,29 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
+ 	return bytes.NewReader(data), nil
+ }
+ 
++func (a *TaskAdaptor) buildSeedanceOpenAIVideosRequestBody(c *gin.Context, info *relaycommon.RelayInfo, req relaycommon.TaskSubmitReq) (io.Reader, error) {
++	var body map[string]interface{}
++	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
++		return nil, err
++	}
++	if body == nil {
++		body = map[string]interface{}{}
++	}
++	if info.IsModelMapped {
++		body["model"] = info.UpstreamModelName
++	} else {
++		info.UpstreamModelName = req.Model
++	}
++	if _, ok := body["duration"]; !ok && strings.TrimSpace(req.Seconds) != "" {
++		body["duration"] = req.Seconds
++	}
++	data, err := common.Marshal(body)
++	if err != nil {
++		return nil, err
++	}
++	return bytes.NewReader(data), nil
++}
++
+ // DoRequest delegates to common helper.
+ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+ 	return channel.DoTaskApiRequest(a, c, info, requestBody)
+@@ -242,6 +359,9 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy
+ 	}
+ 
+ 	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", baseUrl, taskID)
++	if a.isSeedanceOpenAIVideosChannel() {
++		uri = fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
++	}
+ 
+ 	req, err := http.NewRequest(http.MethodGet, uri, nil)
+ 	if err != nil {
+diff --git a/relay/channel/task/doubao/constants.go b/relay/channel/task/doubao/constants.go
+index d65773d30..9e90551bc 100644
+--- a/relay/channel/task/doubao/constants.go
++++ b/relay/channel/task/doubao/constants.go
+@@ -1,5 +1,11 @@
+ package doubao
+ 
++import (
++	"os"
++	"strings"
++	"sync"
++)
++
+ var ModelList = []string{
+ 	"doubao-seedance-1-0-pro-250528",
+ 	"doubao-seedance-1-0-lite-t2v",
+@@ -11,6 +17,36 @@ var ModelList = []string{
+ 
+ var ChannelName = "doubao-video"
+ 
++var (
++	referenceVideoDoublePriceModelsMu sync.RWMutex
++	ReferenceVideoDoublePriceModels   = map[string]bool{}
++)
++
++func ReloadReferenceVideoDoublePriceModelsFromEnv() {
++	models := parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
++	referenceVideoDoublePriceModelsMu.Lock()
++	defer referenceVideoDoublePriceModelsMu.Unlock()
++	ReferenceVideoDoublePriceModels = models
++}
++
++func IsReferenceVideoDoublePriceModel(modelName string) bool {
++	referenceVideoDoublePriceModelsMu.RLock()
++	defer referenceVideoDoublePriceModelsMu.RUnlock()
++	return ReferenceVideoDoublePriceModels[modelName]
++}
++
++func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
++	models := map[string]bool{}
++	for _, item := range strings.Split(raw, ",") {
++		model := strings.TrimSpace(item)
++		if model == "" {
++			continue
++		}
++		models[model] = true
++	}
++	return models
++}
++
+ // videoInputRatioMap 视频输入折扣比率（含视频单价 / 不含视频单价）。
+ // 管理员应将 ModelRatio 设置为"不含视频"的较高费率，
+ // 系统在检测到视频输入时自动乘以此折扣。
+diff --git a/service/task_polling.go b/service/task_polling.go
+index dc85e579e..cc61bcc80 100644
+--- a/service/task_polling.go
++++ b/service/task_polling.go
+@@ -328,6 +328,7 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
+ 	info := &relaycommon.RelayInfo{}
+ 	info.ChannelMeta = &relaycommon.ChannelMeta{
+ 		ChannelBaseUrl: cacheGetChannel.GetBaseURL(),
++		ChannelType:    cacheGetChannel.Type,
+ 	}
+ 	info.ApiKey = cacheGetChannel.Key
+ 	adaptor.Init(info)
+diff --git a/docs/customizations/README.md b/docs/customizations/README.md
+new file mode 100644
+index 000000000..5ce929c6e
+--- /dev/null
++++ b/docs/customizations/README.md
+@@ -0,0 +1,95 @@
++# 二开总览
++
++本仓库基于上游 `new-api` 维护，优先保持主线贴近上游。
++所有本地二开必须同时具备以下三项：
++
++- 文档：`docs/customizations/NNN-*.md`
++- 补丁：`patches/NNN-*.patch`
++- 测试：最小回归验证命令或自动化测试
++
++## 维护原则
++
++- 二开优先做成独立补丁，不直接把长期差异散落在工作区
++- 二开代码改动必须先同步更新对应 patch，再合并
++- 编号是永久 ID，`docs/customizations` 与 `patches` 必须一一对应
++- patch 只承载代码差异，不承载完整业务背景
++- 业务背景、规则、风险、测试方式统一记录在 `docs/customizations`
++- 新增二开时，必须同步更新本文件
++
++## 当前二开清单
++
++### 001-api-key-self-service
++
++- 目标：允许通过 API Key (`Bearer sk-xxx`) 兑换兑换码，并免登录查询当前 key 创建的异步任务列表
++- 影响范围：兑换接口、Token 认证链路、充值使用记录、任务列表接口、任务落库字段、新任务 token 维度查询
++- 当前状态：由原 `001-token-redeem-via-apikey` 和 `005-task-list-via-apikey` 合并，已生成 `patches/001-api-key-self-service.patch`
++
++### 002-task-refund-restore-token-quota
++
++- 目标：异步视频任务失败退款时，按环境变量开关恢复 token/key 额度
++- 影响范围：异步任务计费、任务轮询、token quota 调整
++- 当前状态：已实现，并已生成 `patches/002-task-refund-restore-token-quota.patch`
++
++### 003-mask-billing-amounts-in-errors
++
++- 目标：面向下游客户端的错误响应中保留额度错误语义，但脱敏具体金额 / 额度数值
++- 影响范围：OpenAI / Claude 风格错误响应、异步任务错误响应、客户端错误脱敏
++- 当前状态：已实现，并已生成 `patches/003-mask-billing-amounts-in-errors.patch`
++
++### 004-sora-reference-video-double-price
++
++- 目标：Sora 兼容 `/v1/videos` 请求中，环境变量白名单模型携带参考视频时按“生成时长 + 参考视频总时长”计价
++- 影响范围：异步视频任务请求解析、参考视频时长检测、Sora 任务计费估算、任务 `OtherRatios`
++- 当前状态：已实现，并已生成 `patches/004-sora-reference-video-double-price.patch`
++
++### 005-project-maintenance-workflow
++
++- 目标：保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等项目维护差异
++- 影响范围：CI workflow、README、AGENTS、makefile、同步脚本、补丁校验脚本、relay multipart 工具函数
++- 当前状态：已实现，并已生成 `patches/005-project-maintenance-workflow.patch`
++
++### 006-frontend-lock
++
++- 目标：通过 `FRONTEND_LOCK_PASSWORD` 为前端页面增加弱隐藏锁屏，输入密码后进入原页面
++- 影响范围：Go 启动时 HTML 注入、React 根渲染、锁屏公告展示
++- 当前状态：已实现，并已生成 `patches/006-frontend-lock.patch`
++
++### 007-seedance-reference-video-double-price
++
++- 目标：Seedance/Doubao 视频任务中，环境变量白名单模型携带参考视频时按双倍计费
++- 影响范围：Doubao 视频任务计费估算、启动环境变量加载、任务 `OtherRatios`
++- 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
++
++## 上游同步标准流程
++
++1. 拉取并合并上游 `new-api`
++2. 按编号顺序重放 `patches/*.patch`
++3. 执行二开最小回归测试
++4. 执行 `go build ./...`
++5. 通过后再推送同步分支或创建 PR
++
++## 二开新增流程
++
++1. 在 `docs/customizations` 新增对应文档
++2. 完成代码实现
++3. 生成对应 patch
++4. 补充最小回归测试
++5. 更新本文件的二开清单
++
++## 推荐验证命令
++
++```bash
++make verify-patches
++go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
++go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
++go test ./common -run TestMaskBillingAmountsForClient -count=1
++go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
++go test ./relay/channel/task/sora ./relay/common -count=1
++go test ./relay/channel/task/doubao -count=1
++go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
++go test . -run TestInjectFrontendLockPassword -count=1
++(cd web && bun run build)
++go build ./...
++```
++
++默认 patch 校验基准是当前项目锁定的原版 new-api：`22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。验证其他上游基准时显式设置 `PATCH_BASE_REF`。
+diff --git a/patches/README.md b/patches/README.md
+new file mode 100644
+index 000000000..b653c1f36
+--- /dev/null
++++ b/patches/README.md
+@@ -0,0 +1,445 @@
++# 二开补丁（Custom Patches）
++
++本目录存放在上游 new-api 基础上的二开功能补丁。每次同步上游代码后，按序号重新应用即可。
++
++## 与文档的关系
++
++- 每个 patch 都必须与 `docs/customizations/NNN-*.md` 一一对应
++- patch 只保存代码差异
++- 业务背景、规则、风险、测试方式统一记录在 `docs/customizations/`
++- 新增 patch 后，必须同步更新：
++  - `docs/customizations/README.md`
++  - 对应的 `docs/customizations/NNN-*.md`
++
++## 使用方法
++
++### 校验补丁（每次合并前必须执行）
++
++```bash
++make verify-patches
++```
++
++该命令会检查：
++
++- `patches/NNN-*.patch` 与 `docs/customizations/NNN-*.md` 是否一一对应
++- `patches/README.md` 与 `docs/customizations/README.md` 是否登记了对应二开
++- 所有 patch 是否能按编号顺序应用到当前项目锁定的原版 new-api 基准 `22e509c1efb2260e1537c78684f1a5e9f053b75a`
++- 当前工作区如果有源码改动，是否同步修改了至少一个 `patches/*.patch`
++
++### 自动应用（推荐先尝试）
++
++```bash
++# 在当前项目锁定的原版 new-api 基准上，逐个应用补丁
++git apply patches/001-api-key-self-service.patch
++
++# 如有空白差异，加 --ignore-whitespace
++git apply --ignore-whitespace patches/001-api-key-self-service.patch
++
++# 如有轻微上下文偏移，用 3way merge
++git apply --3way patches/001-api-key-self-service.patch
++```
++
++默认校验基准是 `22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。如果需要验证新的上游基准，可显式设置：
++
++```bash
++PATCH_BASE_REF=upstream/main make verify-patches
++```
++
++### 冲突时手动恢复
++
++如果 `git apply` 失败，根据下面每个补丁的说明手动修改即可。
++
++---
++
++## 001-api-key-self-service.patch
++
++**功能**：API Key 自助能力。允许通过 API Key (`Bearer sk-xxx`) 免登录兑换兑换码，并查询当前 key 创建的异步任务列表。
++
++**背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session，异步任务列表也依赖登录态。本补丁面向 API Key 二次分发、外部控制台和轮询工具，集中提供只持有 API Key 时需要的自助能力。
++
++**涉及文件（9 个）**：
++
++### 1. `controller/token_test.go`
++
++在 token 控制器测试的临时 DB helper 中保存并恢复 `model.DB` / `model.LOG_DB`，避免外部包控制器测试互相污染全局 DB。
++
++### 2. `controller/user.go`
++
++新增 `TokenRedeem`：
++
++- 使用 `TokenAuthReadOnly()` 上下文中的用户和 token 信息
++- 复用原有 `topUpRequest`
++- 调用 `model.RedeemByToken`
++- 成功后返回兑换额度
++
++### 3. `model/redemption.go`
++
++新增 token 场景兑换逻辑 `RedeemByToken`：
++
++- 在同一事务内增加用户钱包 quota
++- 同时增加当前 token 的 `remain_quota`
++- 读取当前 token 名称，并写入充值使用记录
++- 一并核销兑换码
++
++### 4. `router/api-router.go`
++
++新增两条 API Key 认证路由：
++
++```go
++apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
++taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
++```
++
++### 5. `controller/task.go`
++
++新增 `GetUserTokenTask`：
++
++- 从 `TokenAuthReadOnly()` 上下文中读取 `id` 和 `token_id`
++- 复用现有分页参数和任务筛选参数
++- 返回结构与 `/api/task/self` 保持一致
++
++### 6. `model/task.go`
++
++任务表新增独立 `token_id` 列，并新增按 token 维度查任务的方法：
++
++- `TaskGetAllUserTokenTask`
++- `TaskCountAllUserTokenTask`
++- 列表与总数查询直接走独立 `token_id` 列
++- 不为历史任务做懒回填，补丁上线前未写入该列的任务默认查不到
++
++### 7. `controller/relay.go`
++
++异步任务提交成功后，除了继续写 `private_data.token_id`，还同步写入任务表独立 `token_id` 列，保证新任务后续能走索引列查询。
++
++### 8. `controller/user_token_redeem_test.go`
++
++补充 API Key 兑换回归测试：
++
++- `Bearer sk-xxx` 可直接进入兑换链路
++- 成功后用户钱包增加
++- 成功后当前 token 的 `remain_quota` 同步增加
++- 成功后的充值使用记录包含 token/key 名称
++
++### 9. `controller/task_token_test.go`
++
++补充 API Key 任务列表回归测试：
++
++- `Bearer sk-xxx` 可直接访问新接口
++- 仅返回当前 token 创建的任务
++- `task_id` 过滤参数仍然生效
++
++### 回归验证
++
++```bash
++go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
++```
++
++---
++
++## 002-task-refund-restore-token-quota.patch
++
++**功能**：异步视频任务失败退款时，按环境变量开关恢复 token/key 额度。
++
++**背景**：对于做 API Key 二次分发的用户，仅退款到钱包不够，失败任务还需要按开关决定是否恢复 token 可用额度。当前实现引入环境变量 `TASK_REFUND_RESTORE_TOKEN_QUOTA`，默认关闭；开启后，失败退款会同时恢复 token 额度。
++
++**涉及文件（7 个）**：
++
++### 1. `common/constants.go`
++
++新增运行时配置变量：
++
++```go
++var TaskRefundRestoreTokenQuota bool
++```
++
++### 2. `common/init.go`
++
++读取环境变量并记录启动日志：
++
++```go
++TaskRefundRestoreTokenQuota = GetEnvOrDefaultBool("TASK_REFUND_RESTORE_TOKEN_QUOTA", false)
++```
++
++### 3. `service/task_billing.go`
++
++将 `RefundTaskQuota` 中的 token 恢复逻辑改为按开关执行，并在日志 other 字段记录开关状态：
++
++```go
++if common.TaskRefundRestoreTokenQuota {
++	taskAdjustTokenQuota(ctx, task, -quota)
++}
++```
++
++### 4. `service/task_billing_test.go`
++
++补充开关关闭、开关开启和 `UpdateVideoTasks` 失败路径测试。
++
++### 5. `scripts/seed_task_refund_fixture.go`
++
++离线生成 `002` 容器验收所需的 fixture。
++
++### 6. `scripts/mock_video_failure_server.go`
++
++宿主机上的本地 mock 上游服务，提供失败视频任务响应、健康检查和命中统计。
++
++### 7. `scripts/verify_task_refund_restore_token_quota.sh`
++
++黑盒验收脚本，覆盖 `TASK_REFUND_RESTORE_TOKEN_QUOTA=false` 和 `true` 两轮场景。
++
++### 回归验证
++
++```bash
++go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
++bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
++```
++
++---
++
++## 003-mask-billing-amounts-in-errors.patch
++
++**功能**：下游客户端错误响应金额脱敏。
++
++**背景**：预扣费失败、额度不足或部分上游错误文案可能带出具体金额 / 额度数值，例如 `用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900`。这些数值可能暴露本地成本价、预扣费策略或上游额度细节，不适合透传给下游客户。
++
++**涉及文件（7 个）**：
++
++### 1. `common/str.go`
++
++新增 `MaskBillingAmountsForClient`，优先按计费语义标签脱敏，货币符号只作为无标签场景的保守兜底。
++
++### 2. `types/error.go`
++
++在 `ToOpenAIError` / `ToClaudeError` / `MaskSensitiveError` 中调用金额脱敏，覆盖同步 relay 的 OpenAI / Claude 风格错误响应和错误日志展示文本。
++
++### 3. `service/error.go`
++
++在 `TaskErrorWrapper` / `TaskErrorFromAPIError` 中调用金额脱敏，覆盖异步任务错误响应。
++
++### 4. `common/billing_amount_mask_test.go`
++
++覆盖中文预扣费金额、全角美元符号、自定义单位前缀、金额后带数字型元数据、英文额度标签、订阅 `need=` 文案，以及 `status_code` / `request id` 不被误伤。
++
++### 5. `types/error_test.go`
++
++覆盖 OpenAI / Claude 错误转换和错误日志展示文本中的金额脱敏。
++
++### 6. `service/error_test.go`
++
++覆盖异步任务错误包装中的金额脱敏。
++
++### 回归验证
++
++```bash
++go test ./common -run TestMaskBillingAmountsForClient -count=1
++go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
++go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -count=1
++```
++
++---
++
++## 004-sora-reference-video-double-price.patch
++
++**功能**：Sora 兼容 `/v1/videos` 请求中，白名单模型携带参考视频时默认按旧双倍计价；开启环境变量后按“生成时长 + 参考视频总时长”精确计价。
++
++**背景**：部分视频生成模型在请求体 `content` 中携带 `video_url` 参考视频时，上游成本不同于普通文生视频请求。为兼顾稳定性和新计费规则，本补丁默认保持旧的 `video_input: 2` 计费；设置 `SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED=true` 后，才会检测参考视频时长并按精确规则计费。
++
++**涉及文件（6 个）**：
++
++### 1. `relay/common/relay_info.go`
++
++在 `TaskSubmitReq` 中新增 `Content []map[string]any`，用于保留 `/v1/videos` JSON 请求体顶层 `content` 数组。
++
++### 2. `relay/channel/task/sora/constants.go`
++
++新增环境变量白名单和精确计费开关加载逻辑。默认白名单为空；默认不开启精确参考视频时长计费。
++
++### 3. `main.go`
++
++在 `.env` 和 `common.InitEnv()` 之后调用 `soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
++
++### 4. `relay/channel/task/sora/adaptor.go`
++
++在校验阶段识别白名单模型和精确计费开关：默认只在 `EstimateBilling` 中返回 `video_input: 2`；开启精确计费后检测参考视频总时长，并把 `seconds` 设置为 `生成时长 + 参考视频总时长`。
++
++### 5. `relay/channel/task/sora/video_duration.go`
++
++新增参考视频时长检测：精确计费开启时，先用 HTTP Range 读取前 1MiB 尝试解析 MP4/MOV 元数据；失败后回退完整受限下载；仍无法解析或 30 秒内无法完成检测时拒绝请求。
++
++### 6. `service/download.go`
++
++为 Worker 请求增加 context 版本，确保参考视频检测超时时 Worker 模式也能及时返回本地错误。
++
++### 7. `relay/channel/task/sora/adaptor_test.go`
++
++覆盖默认旧双倍计费、精确计费开启后多参考视频时长累加、Range 失败回退完整下载、解析失败拒绝请求、超时拒绝请求、不配置模型白名单不生效，以及环境变量显式 reload 后才生效。
++
++### 回归验证
++
++```bash
++go test ./relay/channel/task/sora
++go test ./relay/common
++```
++
++---
++
++## 005-project-maintenance-workflow.patch
++
++**功能**：项目维护工作流。保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等工程化差异。
++
++**背景**：当前项目除了业务二开外，还需要保留一组用于同步上游、验证补丁和稳定构建的本地维护文件。该补丁用于确保“项目锁定的原版 new-api + patches” 能重放到当前现状。
++
++**涉及文件（12 个）**：
++
++### 1. `.github/workflows/docker-image-manual-ghcr.yml`
++
++保留手动 GHCR Docker 构建流程。
++
++### 2. `.github/workflows/sync-upstream.yml`
++
++保留上游同步 workflow。运行时先暂存当前分支的 `patches/*.patch`，再从 `upstream/<branch>` 创建同步分支并应用暂存补丁，避免在已打补丁分支上重复 apply。
++
++### 3. `.gitignore`
++
++保留本地生成物忽略规则。
++
++### 4. `AGENTS.md`
++
++保留项目内 agent 工作约定。
++
++### 5. `README.md` / `README.zh_CN.md`
++
++保留本地维护说明入口。
++
++### 6. `makefile`
++
++保留 `verify-patches` 等本地维护命令。
++
++### 7. `relay/common/relay_utils.go`
++
++保留 multipart 请求体处理回归修复。
++
++### 8. `relay/common/relay_utils_test.go`
++
++覆盖 multipart 请求体回归测试。
++
++### 9. `scripts/sync_upstream_local.sh`
++
++本地上游同步脚本。
++
++### 10. `scripts/verify_patches.sh`
++
++二开补丁配对和可重放校验脚本。
++
++### 11. `tools/skills/newapi-upstream-sync/SKILL.md`
++
++本地上游同步 skill 说明。
++
++### 回归验证
++
++```bash
++make verify-patches
++go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
++```
++
++---
++
++## 006-frontend-lock.patch
++
++**功能**：前端弱隐藏锁屏。设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问前端页面需要先输入密码。
++
++**背景**：内部服务域名有时会同时暴露前端入口。本补丁用于降低普通访客直接看到管理页面入口的概率，但不提供真正安全隔离。
++
++**涉及文件（8 个）**：
++
++### 1. `main.go`
++
++新增 `InjectFrontendLockPassword`，在服务启动时读取 `FRONTEND_LOCK_PASSWORD` 并注入 `window.__FRONTEND_LOCK_PASSWORD__`。
++
++### 2. `main_test.go`
++
++覆盖空密码跳过注入、正常密码注入，以及 `</script>` 等字符被 JSON 安全转义。
++
++### 3. `web/src/index.jsx`
++
++在根渲染处增加 `FrontendLockGate`，锁定时渲染锁屏，解锁后恢复原 `PageLayout`。
++
++### 4. `web/src/helpers/frontendLock.js`
++
++封装密码读取、开关判断、浏览器解锁缓存和密码校验逻辑。
++
++### 5. `web/src/components/common/FrontendLock.jsx`
++
++新增锁屏 UI，展示公告并提供密码输入。
++
++### 6. `docs/customizations/006-frontend-lock.md`
++
++记录二开背景、行为、风险和验证命令。
++
++### 7. `docs/customizations/README.md`
++
++登记 006 二开。
++
++### 8. `patches/README.md`
++
++登记 006 补丁。
++
++### 回归验证
++
++```bash
++go test . -run TestInjectFrontendLockPassword -count=1
++(cd web && bun run build)
++make verify-patches
++```
++
++---
++
++## 007-seedance-reference-video-double-price.patch
++
++**功能**：Seedance/Doubao 视频任务中，白名单模型携带参考视频时按双倍计费。
++
++**背景**：Seedance/Doubao 已支持 OpenAI Videos 风格 `/v1/videos` 请求。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等字段携带参考视频，这类请求需要与普通文生视频区分计费。
++
++**涉及文件（7 个）**：
++
++### 1. `relay/channel/task/doubao/constants.go`
++
++新增 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 环境变量白名单加载逻辑。默认白名单为空。
++
++### 2. `main.go`
++
++在 `.env` 和 `common.InitEnv()` 之后调用 `doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
++
++### 3. `relay/channel/task/doubao/adaptor.go`
++
++按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`。在 `EstimateBilling` 中识别白名单模型和参考视频字段，命中后返回 `video_input: 2`；保留原有 `metadata.content` 视频输入计费路径。
++
++### 4. `relay/channel/task/doubao/adaptor_test.go`
++
++覆盖白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、原 metadata 视频输入倍率不回退、白名单 metadata 视频按双倍计费，以及两个渠道请求体/URL 分流。
++
++### 5. `docs/customizations/007-seedance-reference-video-double-price.md`
++
++记录二开背景、业务规则、风险和验证命令。
++
++### 6. `docs/customizations/README.md`
++
++登记 007 二开。
++
++### 7. `patches/README.md`
++
++登记 007 补丁。
++
++### 回归验证
++
++```bash
++go test ./relay/channel/task/doubao
++make verify-patches
++```
++
++---
++
++## 补丁维护规范
++
++1. **文件命名**：`NNN-简短描述.patch`，按序号排列
++2. **每个补丁**：在本文件中记录功能说明 + 涉及文件 + 手动恢复步骤
++3. **更新上游后**：先 `git apply`，失败则按文档手动改，最后 `git diff > patches/NNN-xxx.patch` 更新补丁文件
+diff --git a/docs/customizations/007-seedance-reference-video-double-price.md b/docs/customizations/007-seedance-reference-video-double-price.md
+new file mode 100644
+index 000000000..5d19ac08c
+--- /dev/null
++++ b/docs/customizations/007-seedance-reference-video-double-price.md
+@@ -0,0 +1,108 @@
++# 007-seedance-reference-video-double-price
++
++## 1. 背景
++
++Seedance/Doubao 视频生成渠道支持 OpenAI Videos 风格 `/v1/videos` 请求。下游请求体可通过顶层字段携带参考视频，例如：
++
++```json
++{
++  "model": "doubao-seedance-2-0-260128-2",
++  "prompt": "Use the reference video motion style",
++  "input_video": ["https://example.com/reference.mp4"]
++}
++```
++
++这类视频参考请求需要与普通文生视频区分计费。此前 Sora 兼容渠道已有参考视频双倍计费和精确按秒计费能力；本定制只为 Seedance/Doubao 增加简单双倍计费，不启用精确按秒规则。
++
++## 2. 目标
++
++- 仅在 Seedance/Doubao 视频任务适配器中生效
++- `DoubaoVideo` 渠道走 Seedance OpenAI Videos 顶层字段格式；`VolcEngine` 渠道继续保留旧 Doubao `content[]` 请求格式
++- 仅当模型名在环境变量白名单内时生效
++- 识别 OpenAI Videos 风格顶层参考视频字段
++- 命中后通过现有 `OtherRatios` 机制追加 `video_input: 2`
++- 保留原有 `metadata.content` 中 `video_url` 的视频输入计费逻辑
++
++不解决：
++
++- 不新增后台配置页面
++- 不下载或解析参考视频时长
++- 不改变其他渠道的参考视频计费
++
++## 3. 业务规则
++
++- 模型白名单环境变量：`SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS`
++- 模型白名单默认值为空，不配置时任何模型都不会触发 Seedance 参考视频双倍计费
++- 多个模型用英文逗号分隔，例如：
++
++```bash
++SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS=doubao-seedance-2-0-260128-2,doubao-seedance-2-0-260128-3
++```
++
++- 请求模型不在白名单内时，即使包含参考视频也不按本定制双倍计费
++- 判断顶层参考视频的条件：
++  - `input_video` 存在非空 URL 字符串或数组项
++  - `video_url` 存在非空 URL 字符串或数组项
++  - `reference_video` 存在非空 URL 字符串或数组项
++  - `files` 中存在明显视频扩展名 URL，例如 `.mp4`、`.mov`、`.webm`
++- OpenAI Videos 风格顶层字段仅在 `DoubaoVideo` 渠道参与计费判断；`VolcEngine` 旧渠道不会因为顶层 `input_video` / `files` 等字段触发双倍计费
++- `files` 中只有图片或音频 URL 时不触发双倍计费
++- 已有 `metadata.content` 中 `video_url` 的视频输入识别保留：
++  - 白名单模型按 `video_input: 2`
++  - 非白名单模型继续使用原 `videoInputRatioMap` 中的模型专属倍率
++
++## 4. 影响范围
++
++- `relay/channel/task/doubao/constants.go`
++  - 从 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 加载参考视频双倍计费模型白名单
++- `main.go`
++  - 在 `.env` 加载和 `common.InitEnv()` 之后显式刷新 Seedance/Doubao 参考视频计费白名单
++- `relay/channel/task/doubao/adaptor.go`
++  - 按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`
++  - 在 `EstimateBilling` 中识别白名单模型和参考视频字段
++  - 命中 OpenAI Videos 风格参考视频时返回 `video_input: 2`
++  - 保留原有 `metadata.content` 视频输入计费路径
++- `service/task_polling.go`
++  - 轮询初始化时把渠道类型传给视频适配器，保证查询任务也能按 `DoubaoVideo` / `VolcEngine` 分流
++- `relay/channel/task/doubao/adaptor_test.go`
++  - 覆盖白名单、顶层视频字段、图片/音频非视频字段、未配置白名单、原 metadata 路径，以及两个渠道请求体/URL 分流
++
++## 5. 风险点
++
++- 白名单在 `.env` 和环境变量加载后刷新，修改后需要重启服务
++- `files` 通过 URL 扩展名判断是否为视频；无扩展名或扩展名不标准的视频 URL 不会触发
++- 若未来 Seedance 请求体字段变化，需要扩展识别逻辑
++- 若模型映射规则改变计费模型名，需要确认白名单使用的是原始请求模型名还是计费模型名
++
++## 6. 测试方案
++
++最小验证命令：
++
++```bash
++go test ./relay/channel/task/doubao
++```
++
++完整二开校验：
++
++```bash
++make verify-patches
++```
++
++## 7. 升级关注点
++
++上游同步时重点关注：
++
++- `relay/channel/task/doubao/adaptor.go` 中 `EstimateBilling` 是否调整
++- `relay/channel/task/doubao/constants.go` 中模型列表和环境变量加载是否调整
++- `main.go` 中 `.env` / `common.InitEnv()` 的启动顺序是否变化
++- `relay/relay_task.go` 中 `OtherRatios` 乘算逻辑是否调整
++
++## 8. 当前状态
++
++- 已实现环境变量模型白名单限定
++- 已实现 OpenAI Videos 风格顶层参考视频识别
++- 已实现 `DoubaoVideo` 新格式和 `VolcEngine` 旧格式分流
++- 已实现参考视频双倍计费
++- 已保留原 `metadata.content` 视频输入计费逻辑
++- 已补充 Doubao/Seedance 适配器测试
++- 已生成 `patches/007-seedance-reference-video-double-price.patch`
+diff --git a/relay/channel/task/doubao/adaptor_test.go b/relay/channel/task/doubao/adaptor_test.go
+new file mode 100644
+index 000000000..46a9db25a
+--- /dev/null
++++ b/relay/channel/task/doubao/adaptor_test.go
+@@ -0,0 +1,271 @@
++package doubao
++
++import (
++	"io"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/gin-gonic/gin"
++)
++
++func TestEstimateBillingDoublePriceForWhitelistedOpenAIVideosReferenceVideo(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	for _, body := range []string{
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","input_video":["https://cdn.example.com/ref.mp4"]}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","video_url":"https://cdn.example.com/ref.mov"}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","reference_video":"https://cdn.example.com/ref.webm"}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","files":["https://cdn.example.com/ref-image.jpg","https://cdn.example.com/ref-video.mp4"]}`,
++	} {
++		ratios := estimateDoubaoBillingForBody(t, body)
++		if ratios["video_input"] != 2 {
++			t.Fatalf("expected video_input double price for body %s, got %#v", body, ratios)
++		}
++	}
++}
++
++func TestEstimateBillingDoesNotDoublePriceNonVideoFiles(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"files": ["https://cdn.example.com/ref.jpg", "https://cdn.example.com/ref.mp3"]
++	}`
++	ratios := estimateDoubaoBillingForBody(t, body)
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio for image/audio files, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingDoesNotDoublePriceWhenModelNotWhitelisted(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"input_video": ["https://cdn.example.com/ref.mp4"]
++	}`
++	ratios := estimateDoubaoBillingForBody(t, body)
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio without env whitelist, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingDoesNotDoublePriceTopLevelVideoForLegacyVolcEngine(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"input_video": ["https://cdn.example.com/ref.mp4"]
++	}`
++	ratios := estimateDoubaoBillingForBodyWithChannel(t, body, constant.ChannelTypeVolcEngine)
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected legacy volcengine top-level input_video not to trigger video_input ratio, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingKeepsMetadataVideoInputRatio(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128",
++		"prompt": "p",
++		"metadata": {
++			"content": [
++				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
++			]
++		}
++	}`
++	ratios := estimateDoubaoBillingForBody(t, body)
++	want, _ := GetVideoInputRatio("doubao-seedance-2-0-260128")
++	if ratios["video_input"] != want {
++		t.Fatalf("expected metadata video_input ratio %v, got %#v", want, ratios)
++	}
++}
++
++func TestEstimateBillingDoublePriceForWhitelistedMetadataReferenceVideo(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128",
++		"prompt": "p",
++		"metadata": {
++			"content": [
++				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
++			]
++		}
++	}`
++	ratios := estimateDoubaoBillingForBody(t, body)
++	if ratios["video_input"] != 2 {
++		t.Fatalf("expected whitelist metadata video_input double price, got %#v", ratios)
++	}
++}
++
++func TestBuildRequestBodyKeepsSeedanceOpenAIVideosFields(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"seconds": "4",
++		"aspect_ratio": "16:9",
++		"files": ["https://cdn.example.com/ref-image.jpg", "https://cdn.example.com/ref-video.mp4"],
++		"input_video": ["https://cdn.example.com/ref-video-2.mp4"],
++		"audio": ["https://cdn.example.com/ref-audio.mp3"],
++		"generate_audio": true,
++		"resolution": "480p"
++	}`
++	c := newDoubaoTaskContext(body)
++	info := &relaycommon.RelayInfo{
++		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
++		ChannelMeta: &relaycommon.ChannelMeta{
++			ChannelType:       constant.ChannelTypeDoubaoVideo,
++			ChannelBaseUrl:    "https://seedance.example.com",
++			UpstreamModelName: "mapped-seedance-model",
++			IsModelMapped:     true,
++		},
++	}
++	adaptor := &TaskAdaptor{}
++	adaptor.Init(info)
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++	url, err := adaptor.BuildRequestURL(info)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if url != "https://seedance.example.com/v1/videos" {
++		t.Fatalf("unexpected seedance URL: %s", url)
++	}
++	reader, err := adaptor.BuildRequestBody(c, info)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := io.ReadAll(reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got map[string]interface{}
++	if err := common.Unmarshal(data, &got); err != nil {
++		t.Fatal(err)
++	}
++	if got["model"] != "mapped-seedance-model" {
++		t.Fatalf("expected mapped model, got %v", got["model"])
++	}
++	if got["duration"] != "4" {
++		t.Fatalf("expected seconds to populate duration, got %#v", got["duration"])
++	}
++	for _, field := range []string{"files", "input_video", "audio", "aspect_ratio", "generate_audio", "resolution"} {
++		if _, ok := got[field]; !ok {
++			t.Fatalf("expected seedance body to keep %s, got %#v", field, got)
++		}
++	}
++}
++
++func TestBuildRequestBodyKeepsLegacyVolcEngineFormat(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	body := `{
++		"model": "doubao-seedance-2-0-260128",
++		"prompt": "p",
++		"metadata": {
++			"content": [
++				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
++			]
++		}
++	}`
++	c := newDoubaoTaskContext(body)
++	info := &relaycommon.RelayInfo{
++		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
++		ChannelMeta: &relaycommon.ChannelMeta{
++			ChannelType:    constant.ChannelTypeVolcEngine,
++			ChannelBaseUrl: "https://ark.cn-beijing.volces.com",
++		},
++	}
++	adaptor := &TaskAdaptor{}
++	adaptor.Init(info)
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++	url, err := adaptor.BuildRequestURL(info)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if url != "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks" {
++		t.Fatalf("unexpected legacy URL: %s", url)
++	}
++	reader, err := adaptor.BuildRequestBody(c, info)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := io.ReadAll(reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got map[string]interface{}
++	if err := common.Unmarshal(data, &got); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := got["content"]; !ok {
++		t.Fatalf("expected legacy body to contain content, got %#v", got)
++	}
++	if _, ok := got["files"]; ok {
++		t.Fatalf("expected legacy body not to pass files through, got %#v", got)
++	}
++}
++
++func estimateDoubaoBillingForBody(t *testing.T, body string) map[string]float64 {
++	t.Helper()
++	return estimateDoubaoBillingForBodyWithChannel(t, body, constant.ChannelTypeDoubaoVideo)
++}
++
++func estimateDoubaoBillingForBodyWithChannel(t *testing.T, body string, channelType int) map[string]float64 {
++	t.Helper()
++	c := newDoubaoTaskContext(body)
++	info := &relaycommon.RelayInfo{
++		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
++		ChannelMeta: &relaycommon.ChannelMeta{
++			ChannelType: channelType,
++		},
++	}
++	adaptor := &TaskAdaptor{}
++	adaptor.Init(info)
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++	ratios := adaptor.EstimateBilling(c, info)
++	if ratios == nil {
++		return map[string]float64{}
++	}
++	return ratios
++}
++
++func newDoubaoTaskContext(body string) *gin.Context {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	c.Request = req
++	return c
++}

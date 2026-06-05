@@ -1,5 +1,11 @@
 package doubao
 
+import (
+	"os"
+	"strings"
+	"sync"
+)
+
 var ModelList = []string{
 	"doubao-seedance-1-0-pro-250528",
 	"doubao-seedance-1-0-lite-t2v",
@@ -10,6 +16,36 @@ var ModelList = []string{
 }
 
 var ChannelName = "doubao-video"
+
+var (
+	referenceVideoDoublePriceModelsMu sync.RWMutex
+	ReferenceVideoDoublePriceModels   = map[string]bool{}
+)
+
+func ReloadReferenceVideoDoublePriceModelsFromEnv() {
+	models := parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
+	referenceVideoDoublePriceModelsMu.Lock()
+	defer referenceVideoDoublePriceModelsMu.Unlock()
+	ReferenceVideoDoublePriceModels = models
+}
+
+func IsReferenceVideoDoublePriceModel(modelName string) bool {
+	referenceVideoDoublePriceModelsMu.RLock()
+	defer referenceVideoDoublePriceModelsMu.RUnlock()
+	return ReferenceVideoDoublePriceModels[modelName]
+}
+
+func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
+	models := map[string]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		model := strings.TrimSpace(item)
+		if model == "" {
+			continue
+		}
+		models[model] = true
+	}
+	return models
+}
 
 // videoInputRatioMap 视频输入折扣比率（含视频单价 / 不含视频单价）。
 // 管理员应将 ModelRatio 设置为"不含视频"的较高费率，

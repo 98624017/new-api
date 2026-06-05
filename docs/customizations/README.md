@@ -1,6 +1,6 @@
 # 二开总览
 
-本仓库基于上游 `new-api` 维护，优先保持主线贴近上游。  
+本仓库基于上游 `new-api` 维护，优先保持主线贴近上游。
 所有本地二开必须同时具备以下三项：
 
 - 文档：`docs/customizations/NNN-*.md`
@@ -54,6 +54,12 @@
 - 影响范围：Go 启动时 HTML 注入、React 根渲染、锁屏公告展示
 - 当前状态：已实现，并已生成 `patches/006-frontend-lock.patch`
 
+### 007-seedance-reference-video-double-price
+
+- 目标：Seedance/Doubao 视频任务中，环境变量白名单模型携带参考视频时按双倍计费
+- 影响范围：Doubao 视频任务计费估算、启动环境变量加载、任务 `OtherRatios`
+- 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -79,6 +85,7 @@ go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 go test ./common -run TestMaskBillingAmountsForClient -count=1
 go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 go test ./relay/channel/task/sora ./relay/common -count=1
+go test ./relay/channel/task/doubao -count=1
 go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
 go test . -run TestInjectFrontendLockPassword -count=1
 (cd web && bun run build)

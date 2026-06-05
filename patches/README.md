@@ -393,6 +393,51 @@ make verify-patches
 
 ---
 
+## 007-seedance-reference-video-double-price.patch
+
+**功能**：Seedance/Doubao 视频任务中，白名单模型携带参考视频时按双倍计费。
+
+**背景**：Seedance/Doubao 已支持 OpenAI Videos 风格 `/v1/videos` 请求。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等字段携带参考视频，这类请求需要与普通文生视频区分计费。
+
+**涉及文件（7 个）**：
+
+### 1. `relay/channel/task/doubao/constants.go`
+
+新增 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 环境变量白名单加载逻辑。默认白名单为空。
+
+### 2. `main.go`
+
+在 `.env` 和 `common.InitEnv()` 之后调用 `doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
+
+### 3. `relay/channel/task/doubao/adaptor.go`
+
+按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`。在 `EstimateBilling` 中识别白名单模型和参考视频字段，命中后返回 `video_input: 2`；保留原有 `metadata.content` 视频输入计费路径。
+
+### 4. `relay/channel/task/doubao/adaptor_test.go`
+
+覆盖白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、原 metadata 视频输入倍率不回退、白名单 metadata 视频按双倍计费，以及两个渠道请求体/URL 分流。
+
+### 5. `docs/customizations/007-seedance-reference-video-double-price.md`
+
+记录二开背景、业务规则、风险和验证命令。
+
+### 6. `docs/customizations/README.md`
+
+登记 007 二开。
+
+### 7. `patches/README.md`
+
+登记 007 补丁。
+
+### 回归验证
+
+```bash
+go test ./relay/channel/task/doubao
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
