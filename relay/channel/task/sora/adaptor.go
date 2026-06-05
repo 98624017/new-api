@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"path"
 	"strconv"
 	"strings"
 
@@ -134,7 +135,7 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	}
 	if referenceVideoSeconds, ok := getReferenceVideoTotalSeconds(c); ok {
 		ratios["seconds"] = float64(seconds) + referenceVideoSeconds
-	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
+	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideoRequest(c, req) {
 		ratios["video_input"] = 2
 	}
 	return ratios
@@ -145,6 +146,10 @@ func shouldApplyReferenceVideoDurationBilling(modelName string, req relaycommon.
 		modelName = req.Model
 	}
 	return IsReferenceVideoDoublePriceModel(modelName)
+}
+
+func hasReferenceVideoRequest(c *gin.Context, req relaycommon.TaskSubmitReq) bool {
+	return hasReferenceVideo(req.Content) || hasOpenAIVideosReferenceVideo(c)
 }
 
 func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
@@ -186,6 +191,74 @@ func hasReferenceVideo(content []map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func hasOpenAIVideosReferenceVideo(c *gin.Context) bool {
+	var body map[string]interface{}
+	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
+		return false
+	}
+	for _, field := range []string{"input_video", "video_url", "reference_video"} {
+		if hasNonEmptyURLValue(body[field]) {
+			return true
+		}
+	}
+	return hasVideoURLValue(body["files"])
+}
+
+func hasNonEmptyURLValue(value interface{}) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []interface{}:
+		for _, item := range v {
+			if hasNonEmptyURLValue(item) {
+				return true
+			}
+		}
+	case []string:
+		for _, item := range v {
+			if hasNonEmptyURLValue(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasVideoURLValue(value interface{}) bool {
+	switch v := value.(type) {
+	case string:
+		return isVideoReferenceURL(v)
+	case []interface{}:
+		for _, item := range v {
+			if hasVideoURLValue(item) {
+				return true
+			}
+		}
+	case []string:
+		for _, item := range v {
+			if hasVideoURLValue(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isVideoReferenceURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	base := path.Base(strings.Split(raw, "?")[0])
+	ext := strings.ToLower(path.Ext(base))
+	switch ext {
+	case ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {

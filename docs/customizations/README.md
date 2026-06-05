@@ -56,8 +56,8 @@
 
 ### 007-seedance-reference-video-double-price
 
-- 目标：Seedance/Doubao 视频任务中，环境变量白名单模型携带参考视频时按双倍计费
-- 影响范围：Doubao 视频任务计费估算、启动环境变量加载、任务 `OtherRatios`
+- 目标：通过 Sora/OpenAI 视频任务路径接入的 Seedance 模型，环境变量白名单模型携带参考视频时按双倍计费
+- 影响范围：Sora 视频任务计费估算、Seedance 顶层参考视频字段检测、任务 `OtherRatios`
 - 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
 
 ## 上游同步标准流程
@@ -85,7 +85,6 @@ go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
 go test ./common -run TestMaskBillingAmountsForClient -count=1
 go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 go test ./relay/channel/task/sora ./relay/common -count=1
-go test ./relay/channel/task/doubao -count=1
 go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
 go test . -run TestInjectFrontendLockPassword -count=1
 (cd web && bun run build)

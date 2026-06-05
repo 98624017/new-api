@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	commonjson "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -157,8 +158,68 @@ func TestEstimateBillingDoesNotProbeReferenceVideoWhenEnvDoesNotListModel(t *tes
 	}
 }
 
+func TestEstimateBillingDoublePriceForSeedanceOpenAIVideosReferenceVideo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
+	ReloadReferenceVideoDoublePriceModelsFromEnv()
+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
+
+	for _, body := range []string{
+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","input_video":["https://cdn.example.com/ref.mp4"]}`,
+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","video_url":"https://cdn.example.com/ref.mov"}`,
+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","reference_video":"https://cdn.example.com/ref.webm"}`,
+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","files":["https://cdn.example.com/ref-image.jpg","https://cdn.example.com/ref-video.mp4"]}`,
+	} {
+		ratios := estimateBillingForBody(t, body)
+		if ratios["video_input"] != 2 {
+			t.Fatalf("expected seedance top-level reference video double-price for body %s, got %#v", body, ratios)
+		}
+	}
+}
+
+func TestEstimateBillingDoesNotDoublePriceSeedanceNonVideoFiles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
+	ReloadReferenceVideoDoublePriceModelsFromEnv()
+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
+
+	body := `{
+		"model": "doubao-seedance-2-0-260128-2",
+		"prompt": "p",
+		"files": ["https://cdn.example.com/ref.jpg", "https://cdn.example.com/ref.mp3"]
+	}`
+	ratios := estimateBillingForBody(t, body)
+	if _, ok := ratios["video_input"]; ok {
+		t.Fatalf("expected no video_input ratio for image/audio files, got %#v", ratios)
+	}
+}
+
+func TestEstimateBillingDoesNotDoublePriceSeedanceWhenModelNotWhitelisted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
+	ReloadReferenceVideoDoublePriceModelsFromEnv()
+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
+
+	body := `{
+		"model": "doubao-seedance-2-0-260128-2",
+		"prompt": "p",
+		"input_video": ["https://cdn.example.com/ref.mp4"]
+	}`
+	ratios := estimateBillingForBody(t, body)
+	if _, ok := ratios["video_input"]; ok {
+		t.Fatalf("expected no video_input ratio without seedance env whitelist, got %#v", ratios)
+	}
+}
+
 func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
 	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
 	ReloadReferenceVideoDoublePriceModelsFromEnv()
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
@@ -178,6 +239,64 @@ func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
 	}
 	if !ReferenceVideoDurationBillingEnabled() {
 		t.Fatal("expected explicit reload to load duration billing toggle")
+	}
+}
+
+func TestReferenceVideoDoublePriceModelsIncludeSeedanceEnv(t *testing.T) {
+	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
+	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
+	ReloadReferenceVideoDoublePriceModelsFromEnv()
+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
+
+	if !IsReferenceVideoDoublePriceModel("doubao-seedance-2-0-260128-2") {
+		t.Fatal("expected seedance env whitelist to load into sora task billing models")
+	}
+}
+
+func TestBuildRequestBodyKeepsSeedanceOpenAIVideosFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := `{
+		"model": "doubao-seedance-2-0-260128-2",
+		"prompt": "p",
+		"duration": "4",
+		"aspect_ratio": "16:9",
+		"files": ["https://cdn.example.com/ref-image.jpg", "https://cdn.example.com/ref-video.mp4"],
+		"input_video": ["https://cdn.example.com/ref-video-2.mp4"],
+		"audio": ["https://cdn.example.com/ref-audio.mp3"],
+		"generate_audio": true,
+		"resolution": "480p"
+	}`
+	c := newTaskContext(t, body)
+	info := &common.RelayInfo{
+		TaskRelayInfo: &common.TaskRelayInfo{},
+		ChannelMeta: &common.ChannelMeta{
+			UpstreamModelName: "mapped-seedance-model",
+		},
+	}
+	adaptor := &TaskAdaptor{}
+	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
+	}
+	reader, err := adaptor.BuildRequestBody(c, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := commonjson.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "mapped-seedance-model" {
+		t.Fatalf("expected mapped model, got %v", got["model"])
+	}
+	for _, field := range []string{"files", "input_video", "audio", "aspect_ratio", "generate_audio", "resolution"} {
+		if _, ok := got[field]; !ok {
+			t.Fatalf("expected sora seedance body to keep %s, got %#v", field, got)
+		}
 	}
 }
 

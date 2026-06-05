@@ -58,8 +58,8 @@ Questions to answer:
 
 #### 5. Good/Base/Bad Cases
 
-- Good: `ChannelTypeDoubaoVideo` reads OpenAI Videos top-level `input_video` / `files` fields and forwards the original top-level request body upstream.
-- Base: `ChannelTypeVolcEngine` keeps legacy `metadata.content` conversion and legacy video-input ratio behavior.
+- Good: the adaptor path that actually forwards OpenAI Videos top-level `input_video` / `files` fields also owns the billing detector for those fields.
+- Base: a legacy provider-specific adaptor keeps its legacy request conversion and legacy video-input ratio behavior.
 - Bad: a shared `EstimateBilling` checks OpenAI Videos top-level fields without confirming the current channel actually forwards those fields.
 
 #### 6. Tests Required

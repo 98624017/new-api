@@ -395,44 +395,40 @@ make verify-patches
 
 ## 007-seedance-reference-video-double-price.patch
 
-**功能**：Seedance/Doubao 视频任务中，白名单模型携带参考视频时按双倍计费。
+**功能**：通过 Sora/OpenAI 视频任务路径接入的 Seedance 模型，白名单模型携带参考视频时按双倍计费。
 
-**背景**：Seedance/Doubao 已支持 OpenAI Videos 风格 `/v1/videos` 请求。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等字段携带参考视频，这类请求需要与普通文生视频区分计费。
+**背景**：Seedance 在当前部署中复用 NewAPI 的 Sora/OpenAI 视频任务机制，上游兼容 `/v1/videos`。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等顶层字段携带参考视频，这类请求需要与普通文生视频区分计费。
 
-**涉及文件（7 个）**：
+**涉及文件（6 个）**：
 
-### 1. `relay/channel/task/doubao/constants.go`
+### 1. `relay/channel/task/sora/constants.go`
 
-新增 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 环境变量白名单加载逻辑。默认白名单为空。
+将 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 合并到 Sora 参考视频双倍计费白名单。默认白名单为空。
 
-### 2. `main.go`
+### 2. `relay/channel/task/sora/adaptor.go`
 
-在 `.env` 和 `common.InitEnv()` 之后调用 `doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
+在 `EstimateBilling` 中识别 OpenAI Videos 顶层参考视频字段，命中白名单模型后返回 `video_input: 2`；保留原有 `content[].video_url` 视频输入计费路径。
 
-### 3. `relay/channel/task/doubao/adaptor.go`
+### 3. `relay/channel/task/sora/adaptor_test.go`
 
-按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`。在 `EstimateBilling` 中识别白名单模型和参考视频字段，命中后返回 `video_input: 2`；保留原有 `metadata.content` 视频输入计费路径。
+覆盖 Seedance 白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、Seedance 白名单加载，以及 Sora JSON 请求体字段透传。
 
-### 4. `relay/channel/task/doubao/adaptor_test.go`
-
-覆盖白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、原 metadata 视频输入倍率不回退、白名单 metadata 视频按双倍计费，以及两个渠道请求体/URL 分流。
-
-### 5. `docs/customizations/007-seedance-reference-video-double-price.md`
+### 4. `docs/customizations/007-seedance-reference-video-double-price.md`
 
 记录二开背景、业务规则、风险和验证命令。
 
-### 6. `docs/customizations/README.md`
+### 5. `docs/customizations/README.md`
 
 登记 007 二开。
 
-### 7. `patches/README.md`
+### 6. `patches/README.md`
 
 登记 007 补丁。
 
 ### 回归验证
 
 ```bash
-go test ./relay/channel/task/doubao
+go test ./relay/channel/task/sora
 make verify-patches
 ```
 

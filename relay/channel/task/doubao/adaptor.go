@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -110,17 +108,9 @@ type TaskAdaptor struct {
 }
 
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
-	if info.ChannelMeta != nil && info.ChannelMeta.ChannelType != 0 {
-		a.ChannelType = info.ChannelMeta.ChannelType
-	}
-	if info.ChannelMeta != nil && info.ChannelMeta.ChannelBaseUrl != "" {
-		a.baseURL = info.ChannelMeta.ChannelBaseUrl
-	}
+	a.ChannelType = info.ChannelType
+	a.baseURL = info.ChannelBaseUrl
 	a.apiKey = info.ApiKey
-}
-
-func (a *TaskAdaptor) isSeedanceOpenAIVideosChannel() bool {
-	return a.ChannelType == constant.ChannelTypeDoubaoVideo
 }
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
@@ -131,9 +121,6 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 
 // BuildRequestURL constructs the upstream URL.
 func (a *TaskAdaptor) BuildRequestURL(_ *relaycommon.RelayInfo) (string, error) {
-	if a.isSeedanceOpenAIVideosChannel() {
-		return fmt.Sprintf("%s/v1/videos", a.baseURL), nil
-	}
 	return fmt.Sprintf("%s/api/v3/contents/generations/tasks", a.baseURL), nil
 }
 
@@ -151,89 +138,12 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if err != nil {
 		return nil
 	}
-	modelName := info.OriginModelName
-	if modelName == "" {
-		modelName = req.Model
-	}
-	hasMetadataVideo := hasVideoInMetadata(req.Metadata)
-	hasOpenAIVideosReferenceVideo := a.isSeedanceOpenAIVideosChannel() && hasReferenceVideoInOpenAIVideosRequest(c)
-	if IsReferenceVideoDoublePriceModel(modelName) && (hasOpenAIVideosReferenceVideo || hasMetadataVideo) {
-		return map[string]float64{"video_input": 2}
-	}
-	if hasMetadataVideo {
-		if ratio, ok := GetVideoInputRatio(modelName); ok {
+	if hasVideoInMetadata(req.Metadata) {
+		if ratio, ok := GetVideoInputRatio(info.OriginModelName); ok {
 			return map[string]float64{"video_input": ratio}
 		}
 	}
 	return nil
-}
-
-func hasReferenceVideoInOpenAIVideosRequest(c *gin.Context) bool {
-	var body map[string]interface{}
-	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
-		return false
-	}
-	for _, field := range []string{"input_video", "video_url", "reference_video"} {
-		if hasNonEmptyURLValue(body[field]) {
-			return true
-		}
-	}
-	return hasVideoURLValue(body["files"])
-}
-
-func hasNonEmptyURLValue(value interface{}) bool {
-	switch v := value.(type) {
-	case string:
-		return strings.TrimSpace(v) != ""
-	case []interface{}:
-		for _, item := range v {
-			if hasNonEmptyURLValue(item) {
-				return true
-			}
-		}
-	case []string:
-		for _, item := range v {
-			if hasNonEmptyURLValue(item) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasVideoURLValue(value interface{}) bool {
-	switch v := value.(type) {
-	case string:
-		return isVideoReferenceURL(v)
-	case []interface{}:
-		for _, item := range v {
-			if hasVideoURLValue(item) {
-				return true
-			}
-		}
-	case []string:
-		for _, item := range v {
-			if hasVideoURLValue(item) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isVideoReferenceURL(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
-	}
-	base := path.Base(strings.Split(raw, "?")[0])
-	ext := strings.ToLower(path.Ext(base))
-	switch ext {
-	case ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg":
-		return true
-	default:
-		return false
-	}
 }
 
 // hasVideoInMetadata 直接检查 metadata 的 content 数组是否包含 video_url 条目，
@@ -272,10 +182,6 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 
-	if a.isSeedanceOpenAIVideosChannel() {
-		return a.buildSeedanceOpenAIVideosRequestBody(c, info, req)
-	}
-
 	body, err := a.convertToRequestPayload(&req)
 	if err != nil {
 		return nil, errors.Wrap(err, "convert request payload failed")
@@ -284,29 +190,6 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		body.Model = info.UpstreamModelName
 	} else {
 		info.UpstreamModelName = body.Model
-	}
-	data, err := common.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	return bytes.NewReader(data), nil
-}
-
-func (a *TaskAdaptor) buildSeedanceOpenAIVideosRequestBody(c *gin.Context, info *relaycommon.RelayInfo, req relaycommon.TaskSubmitReq) (io.Reader, error) {
-	var body map[string]interface{}
-	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
-		return nil, err
-	}
-	if body == nil {
-		body = map[string]interface{}{}
-	}
-	if info.IsModelMapped {
-		body["model"] = info.UpstreamModelName
-	} else {
-		info.UpstreamModelName = req.Model
-	}
-	if _, ok := body["duration"]; !ok && strings.TrimSpace(req.Seconds) != "" {
-		body["duration"] = req.Seconds
 	}
 	data, err := common.Marshal(body)
 	if err != nil {
@@ -359,9 +242,6 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	}
 
 	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", baseUrl, taskID)
-	if a.isSeedanceOpenAIVideosChannel() {
-		uri = fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
-	}
 
 	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {

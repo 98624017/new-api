@@ -1,93 +1,40 @@
-diff --git a/main.go b/main.go
-index 1b6ecfda5..ebcd53788 100644
---- a/main.go
-+++ b/main.go
-@@ -20,6 +20,7 @@ import (
- 	"github.com/QuantumNous/new-api/model"
- 	"github.com/QuantumNous/new-api/oauth"
- 	"github.com/QuantumNous/new-api/relay"
-+	doubaotask "github.com/QuantumNous/new-api/relay/channel/task/doubao"
- 	soratask "github.com/QuantumNous/new-api/relay/channel/task/sora"
- 	"github.com/QuantumNous/new-api/router"
- 	"github.com/QuantumNous/new-api/service"
-@@ -274,6 +275,7 @@ func InitResources() error {
- 
- 	// 加载环境变量
- 	common.InitEnv()
-+	doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()
- 	soratask.ReloadReferenceVideoDoublePriceModelsFromEnv()
- 
- 	logger.SetupLogger()
-diff --git a/relay/channel/task/doubao/adaptor.go b/relay/channel/task/doubao/adaptor.go
-index a6dabb5f1..b0760875c 100644
---- a/relay/channel/task/doubao/adaptor.go
-+++ b/relay/channel/task/doubao/adaptor.go
-@@ -5,7 +5,9 @@ import (
- 	"fmt"
- 	"io"
+diff --git a/relay/channel/task/sora/adaptor.go b/relay/channel/task/sora/adaptor.go
+index 97ef376..da4cdf0 100644
+--- a/relay/channel/task/sora/adaptor.go
++++ b/relay/channel/task/sora/adaptor.go
+@@ -7,6 +7,7 @@ import (
+ 	"mime/multipart"
  	"net/http"
+ 	"net/textproto"
 +	"path"
  	"strconv"
-+	"strings"
- 	"time"
+ 	"strings"
  
- 	"github.com/QuantumNous/new-api/common"
-@@ -108,11 +110,19 @@ type TaskAdaptor struct {
+@@ -134,7 +135,7 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+ 	}
+ 	if referenceVideoSeconds, ok := getReferenceVideoTotalSeconds(c); ok {
+ 		ratios["seconds"] = float64(seconds) + referenceVideoSeconds
+-	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideo(req.Content) {
++	} else if shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) && hasReferenceVideoRequest(c, req) {
+ 		ratios["video_input"] = 2
+ 	}
+ 	return ratios
+@@ -147,6 +148,10 @@ func shouldApplyReferenceVideoDurationBilling(modelName string, req relaycommon.
+ 	return IsReferenceVideoDoublePriceModel(modelName)
  }
  
- func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
--	a.ChannelType = info.ChannelType
--	a.baseURL = info.ChannelBaseUrl
-+	if info.ChannelMeta != nil && info.ChannelMeta.ChannelType != 0 {
-+		a.ChannelType = info.ChannelMeta.ChannelType
-+	}
-+	if info.ChannelMeta != nil && info.ChannelMeta.ChannelBaseUrl != "" {
-+		a.baseURL = info.ChannelMeta.ChannelBaseUrl
-+	}
- 	a.apiKey = info.ApiKey
- }
- 
-+func (a *TaskAdaptor) isSeedanceOpenAIVideosChannel() bool {
-+	return a.ChannelType == constant.ChannelTypeDoubaoVideo
++func hasReferenceVideoRequest(c *gin.Context, req relaycommon.TaskSubmitReq) bool {
++	return hasReferenceVideo(req.Content) || hasOpenAIVideosReferenceVideo(c)
 +}
 +
- // ValidateRequestAndSetAction parses body, validates fields and sets default action.
- func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
- 	// Accept only POST /v1/video/generations as "generate" action.
-@@ -121,6 +131,9 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
- 
- // BuildRequestURL constructs the upstream URL.
- func (a *TaskAdaptor) BuildRequestURL(_ *relaycommon.RelayInfo) (string, error) {
-+	if a.isSeedanceOpenAIVideosChannel() {
-+		return fmt.Sprintf("%s/v1/videos", a.baseURL), nil
-+	}
- 	return fmt.Sprintf("%s/api/v3/contents/generations/tasks", a.baseURL), nil
- }
- 
-@@ -138,14 +151,91 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+ func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+ 	req, err := relaycommon.GetTaskRequest(c)
  	if err != nil {
- 		return nil
- 	}
--	if hasVideoInMetadata(req.Metadata) {
--		if ratio, ok := GetVideoInputRatio(info.OriginModelName); ok {
-+	modelName := info.OriginModelName
-+	if modelName == "" {
-+		modelName = req.Model
-+	}
-+	hasMetadataVideo := hasVideoInMetadata(req.Metadata)
-+	hasOpenAIVideosReferenceVideo := a.isSeedanceOpenAIVideosChannel() && hasReferenceVideoInOpenAIVideosRequest(c)
-+	if IsReferenceVideoDoublePriceModel(modelName) && (hasOpenAIVideosReferenceVideo || hasMetadataVideo) {
-+		return map[string]float64{"video_input": 2}
-+	}
-+	if hasMetadataVideo {
-+		if ratio, ok := GetVideoInputRatio(modelName); ok {
- 			return map[string]float64{"video_input": ratio}
- 		}
- 	}
- 	return nil
+@@ -188,6 +193,74 @@ func hasReferenceVideo(content []map[string]any) bool {
+ 	return false
  }
  
-+func hasReferenceVideoInOpenAIVideosRequest(c *gin.Context) bool {
++func hasOpenAIVideosReferenceVideo(c *gin.Context) bool {
 +	var body map[string]interface{}
 +	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
 +		return false
@@ -155,131 +102,482 @@ index a6dabb5f1..b0760875c 100644
 +	}
 +}
 +
- // hasVideoInMetadata 直接检查 metadata 的 content 数组是否包含 video_url 条目，
- // 避免构建完整的上游 requestPayload。
- func hasVideoInMetadata(metadata map[string]interface{}) bool {
-@@ -182,6 +272,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
- 		return nil, err
- 	}
+ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
+ 	if info.Action == constant.TaskActionRemix {
+ 		return fmt.Sprintf("%s/v1/videos/%s/remix", a.baseURL, info.OriginTaskID), nil
+diff --git a/relay/channel/task/sora/constants.go b/relay/channel/task/sora/constants.go
+index b6a0a45..f5f9892 100644
+--- a/relay/channel/task/sora/constants.go
++++ b/relay/channel/task/sora/constants.go
+@@ -21,6 +21,9 @@ var (
  
-+	if a.isSeedanceOpenAIVideosChannel() {
-+		return a.buildSeedanceOpenAIVideosRequestBody(c, info, req)
-+	}
-+
- 	body, err := a.convertToRequestPayload(&req)
- 	if err != nil {
- 		return nil, errors.Wrap(err, "convert request payload failed")
-@@ -198,6 +292,29 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
- 	return bytes.NewReader(data), nil
- }
- 
-+func (a *TaskAdaptor) buildSeedanceOpenAIVideosRequestBody(c *gin.Context, info *relaycommon.RelayInfo, req relaycommon.TaskSubmitReq) (io.Reader, error) {
-+	var body map[string]interface{}
-+	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
-+		return nil, err
-+	}
-+	if body == nil {
-+		body = map[string]interface{}{}
-+	}
-+	if info.IsModelMapped {
-+		body["model"] = info.UpstreamModelName
-+	} else {
-+		info.UpstreamModelName = req.Model
-+	}
-+	if _, ok := body["duration"]; !ok && strings.TrimSpace(req.Seconds) != "" {
-+		body["duration"] = req.Seconds
-+	}
-+	data, err := common.Marshal(body)
-+	if err != nil {
-+		return nil, err
-+	}
-+	return bytes.NewReader(data), nil
-+}
-+
- // DoRequest delegates to common helper.
- func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
- 	return channel.DoTaskApiRequest(a, c, info, requestBody)
-@@ -242,6 +359,9 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy
- 	}
- 
- 	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", baseUrl, taskID)
-+	if a.isSeedanceOpenAIVideosChannel() {
-+		uri = fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
-+	}
- 
- 	req, err := http.NewRequest(http.MethodGet, uri, nil)
- 	if err != nil {
-diff --git a/relay/channel/task/doubao/constants.go b/relay/channel/task/doubao/constants.go
-index d65773d30..9e90551bc 100644
---- a/relay/channel/task/doubao/constants.go
-+++ b/relay/channel/task/doubao/constants.go
-@@ -1,5 +1,11 @@
- package doubao
- 
-+import (
-+	"os"
-+	"strings"
-+	"sync"
-+)
-+
- var ModelList = []string{
- 	"doubao-seedance-1-0-pro-250528",
- 	"doubao-seedance-1-0-lite-t2v",
-@@ -11,6 +17,36 @@ var ModelList = []string{
- 
- var ChannelName = "doubao-video"
- 
-+var (
-+	referenceVideoDoublePriceModelsMu sync.RWMutex
-+	ReferenceVideoDoublePriceModels   = map[string]bool{}
-+)
-+
-+func ReloadReferenceVideoDoublePriceModelsFromEnv() {
-+	models := parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
-+	referenceVideoDoublePriceModelsMu.Lock()
-+	defer referenceVideoDoublePriceModelsMu.Unlock()
-+	ReferenceVideoDoublePriceModels = models
-+}
-+
-+func IsReferenceVideoDoublePriceModel(modelName string) bool {
-+	referenceVideoDoublePriceModelsMu.RLock()
-+	defer referenceVideoDoublePriceModelsMu.RUnlock()
-+	return ReferenceVideoDoublePriceModels[modelName]
-+}
-+
-+func parseReferenceVideoDoublePriceModels(raw string) map[string]bool {
-+	models := map[string]bool{}
-+	for _, item := range strings.Split(raw, ",") {
-+		model := strings.TrimSpace(item)
-+		if model == "" {
-+			continue
-+		}
+ func ReloadReferenceVideoDoublePriceModelsFromEnv() {
+ 	models := parseReferenceVideoDoublePriceModels(os.Getenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS"))
++	for model := range parseReferenceVideoDoublePriceModels(os.Getenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS")) {
 +		models[model] = true
 +	}
-+	return models
+ 	durationBilling := parseReferenceVideoDurationBillingEnabled(os.Getenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED"))
+ 	referenceVideoDoublePriceModelsMu.Lock()
+ 	defer referenceVideoDoublePriceModelsMu.Unlock()
+diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
+new file mode 100644
+index 0000000..2f44b5f
+--- /dev/null
++++ b/relay/channel/task/sora/adaptor_test.go
+@@ -0,0 +1,447 @@
++package sora
++
++import (
++	"bytes"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	commonjson "github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/dto"
++	"github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/gin-gonic/gin"
++)
++
++const testReferenceVideoRangeProbeBytes = 1024 * 1024
++
++func TestEstimateBillingDefaultsToDoublePriceWhenEnvConfiguredModelHasReferenceVideo(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
++	if ratios["seconds"] != 10 {
++		t.Fatalf("expected generated seconds to stay unchanged, got %#v", ratios)
++	}
++	if ratios["video_input"] != 2 {
++		t.Fatalf("expected default video_input double-price ratio, got %#v", ratios)
++	}
 +}
 +
- // videoInputRatioMap 视频输入折扣比率（含视频单价 / 不含视频单价）。
- // 管理员应将 ModelRatio 设置为"不含视频"的较高费率，
- // 系统在检测到视频输入时自动乘以此折扣。
-diff --git a/service/task_polling.go b/service/task_polling.go
-index dc85e579e..cc61bcc80 100644
---- a/service/task_polling.go
-+++ b/service/task_polling.go
-@@ -328,6 +328,7 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
- 	info := &relaycommon.RelayInfo{}
- 	info.ChannelMeta = &relaycommon.ChannelMeta{
- 		ChannelBaseUrl: cacheGetChannel.GetBaseURL(),
-+		ChannelType:    cacheGetChannel.Type,
- 	}
- 	info.ApiKey = cacheGetChannel.Key
- 	adaptor.Init(info)
++func TestEstimateBillingAddsAllReferenceVideoDurationsWhenDurationBillingEnabled(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++	allowLocalVideoServers(t)
++
++	firstVideoServer := newRangeVideoServer(t, minimalMP4(t, 6))
++	defer firstVideoServer.Close()
++	secondVideoServer := newRangeVideoServer(t, minimalMP4(t, 3))
++	defer secondVideoServer.Close()
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0", firstVideoServer.URL, secondVideoServer.URL))
++	if ratios["seconds"] != 19 {
++		t.Fatalf("expected seconds ratio to include 9s total reference videos, got %#v", ratios)
++	}
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input double-price ratio, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingFallsBackToFullDownloadWhenRangeProbeCannotReadDuration(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++	allowLocalVideoServers(t)
++
++	var rangeRequests int
++	var fullRequests int
++	videoBytes := appendMinimalMP4AfterPayload(t, 4, bytes.Repeat([]byte{0}, testReferenceVideoRangeProbeBytes+64))
++	videoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Header.Get("Range") != "" {
++			rangeRequests++
++			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", testReferenceVideoRangeProbeBytes-1, len(videoBytes)))
++			w.WriteHeader(http.StatusPartialContent)
++			_, _ = w.Write(videoBytes[:testReferenceVideoRangeProbeBytes])
++			return
++		}
++		fullRequests++
++		_, _ = w.Write(videoBytes)
++	}))
++	defer videoServer.Close()
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0", videoServer.URL))
++	if ratios["seconds"] != 14 {
++		t.Fatalf("expected seconds ratio to include 4s reference video, got %#v", ratios)
++	}
++	if rangeRequests == 0 || fullRequests == 0 {
++		t.Fatalf("expected range probe then full fallback, got range=%d full=%d", rangeRequests, fullRequests)
++	}
++}
++
++func TestValidateRejectsWhenReferenceVideoDurationCannotBeDetected(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++	allowLocalVideoServers(t)
++
++	videoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		_, _ = w.Write([]byte("not an mp4"))
++	}))
++	defer videoServer.Close()
++
++	taskErr := validateBody(t, referenceVideoRequestBody("seedance-2.0", videoServer.URL))
++	if taskErr == nil {
++		t.Fatal("expected validation to reject unparseable reference video")
++	}
++	if taskErr.Code != "reference_video_duration_unavailable" {
++		t.Fatalf("expected reference video duration error, got code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++}
++
++func TestValidateRejectsWhenReferenceVideoDurationTimesOut(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++	allowLocalVideoServers(t)
++	setReferenceVideoDurationProbeTimeoutForTest(t, 20*time.Millisecond)
++
++	videoBytes := minimalMP4(t, 1)
++	videoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		select {
++		case <-r.Context().Done():
++			return
++		case <-time.After(200 * time.Millisecond):
++			_, _ = w.Write(videoBytes)
++		}
++	}))
++	defer videoServer.Close()
++
++	taskErr := validateBody(t, referenceVideoRequestBody("seedance-2.0", videoServer.URL))
++	if taskErr == nil {
++		t.Fatal("expected validation to reject timed out reference video")
++	}
++	if taskErr.Code != "reference_video_duration_unavailable" {
++		t.Fatalf("expected reference video duration error, got code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++	if !strings.Contains(taskErr.Message, "timed out") {
++		t.Fatalf("expected timeout message, got %s", taskErr.Message)
++	}
++}
++
++func TestEstimateBillingDoesNotProbeReferenceVideoWhenEnvDoesNotListModel(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	ratios := estimateBillingForBody(t, referenceVideoRequestBody("seedance-2.0"))
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio without env whitelist, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingDoublePriceForSeedanceOpenAIVideosReferenceVideo(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	for _, body := range []string{
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","input_video":["https://cdn.example.com/ref.mp4"]}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","video_url":"https://cdn.example.com/ref.mov"}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","reference_video":"https://cdn.example.com/ref.webm"}`,
++		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","files":["https://cdn.example.com/ref-image.jpg","https://cdn.example.com/ref-video.mp4"]}`,
++	} {
++		ratios := estimateBillingForBody(t, body)
++		if ratios["video_input"] != 2 {
++			t.Fatalf("expected seedance top-level reference video double-price for body %s, got %#v", body, ratios)
++		}
++	}
++}
++
++func TestEstimateBillingDoesNotDoublePriceSeedanceNonVideoFiles(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"files": ["https://cdn.example.com/ref.jpg", "https://cdn.example.com/ref.mp3"]
++	}`
++	ratios := estimateBillingForBody(t, body)
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio for image/audio files, got %#v", ratios)
++	}
++}
++
++func TestEstimateBillingDoesNotDoublePriceSeedanceWhenModelNotWhitelisted(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"input_video": ["https://cdn.example.com/ref.mp4"]
++	}`
++	ratios := estimateBillingForBody(t, body)
++	if _, ok := ratios["video_input"]; ok {
++		t.Fatalf("expected no video_input ratio without seedance env whitelist, got %#v", ratios)
++	}
++}
++
++func TestReferenceVideoDoublePriceModelsRequireExplicitReload(t *testing.T) {
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "true")
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	if IsReferenceVideoDoublePriceModel("seedance-2.0") {
++		t.Fatal("expected env change not to load until explicit reload")
++	}
++	if ReferenceVideoDurationBillingEnabled() {
++		t.Fatal("expected env change not to load duration billing until explicit reload")
++	}
++
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	if !IsReferenceVideoDoublePriceModel("seedance-2.0") {
++		t.Fatal("expected explicit reload to load env whitelist")
++	}
++	if !ReferenceVideoDurationBillingEnabled() {
++		t.Fatal("expected explicit reload to load duration billing toggle")
++	}
++}
++
++func TestReferenceVideoDoublePriceModelsIncludeSeedanceEnv(t *testing.T) {
++	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
++	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
++	t.Setenv("SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED", "")
++	ReloadReferenceVideoDoublePriceModelsFromEnv()
++	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
++
++	if !IsReferenceVideoDoublePriceModel("doubao-seedance-2-0-260128-2") {
++		t.Fatal("expected seedance env whitelist to load into sora task billing models")
++	}
++}
++
++func TestBuildRequestBodyKeepsSeedanceOpenAIVideosFields(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	body := `{
++		"model": "doubao-seedance-2-0-260128-2",
++		"prompt": "p",
++		"duration": "4",
++		"aspect_ratio": "16:9",
++		"files": ["https://cdn.example.com/ref-image.jpg", "https://cdn.example.com/ref-video.mp4"],
++		"input_video": ["https://cdn.example.com/ref-video-2.mp4"],
++		"audio": ["https://cdn.example.com/ref-audio.mp3"],
++		"generate_audio": true,
++		"resolution": "480p"
++	}`
++	c := newTaskContext(t, body)
++	info := &common.RelayInfo{
++		TaskRelayInfo: &common.TaskRelayInfo{},
++		ChannelMeta: &common.ChannelMeta{
++			UpstreamModelName: "mapped-seedance-model",
++		},
++	}
++	adaptor := &TaskAdaptor{}
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++	reader, err := adaptor.BuildRequestBody(c, info)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := io.ReadAll(reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got map[string]interface{}
++	if err := commonjson.Unmarshal(data, &got); err != nil {
++		t.Fatal(err)
++	}
++	if got["model"] != "mapped-seedance-model" {
++		t.Fatalf("expected mapped model, got %v", got["model"])
++	}
++	for _, field := range []string{"files", "input_video", "audio", "aspect_ratio", "generate_audio", "resolution"} {
++		if _, ok := got[field]; !ok {
++			t.Fatalf("expected sora seedance body to keep %s, got %#v", field, got)
++		}
++	}
++}
++
++func estimateBillingForBody(t *testing.T, body string) map[string]float64 {
++	t.Helper()
++	c := newTaskContext(t, body)
++	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{}}
++	adaptor := &TaskAdaptor{}
++	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++
++	return adaptor.EstimateBilling(c, info)
++}
++
++func validateBody(t *testing.T, body string) *dto.TaskError {
++	t.Helper()
++	c := newTaskContext(t, body)
++	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{}}
++	adaptor := &TaskAdaptor{}
++	return adaptor.ValidateRequestAndSetAction(c, info)
++}
++
++func newTaskContext(t *testing.T, body string) *gin.Context {
++	t.Helper()
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	c.Request = req
++	return c
++}
++
++func allowLocalVideoServers(t *testing.T) {
++	t.Helper()
++	fetchSetting := system_setting.GetFetchSetting()
++	original := *fetchSetting
++	fetchSetting.EnableSSRFProtection = false
++	t.Cleanup(func() {
++		*fetchSetting = original
++	})
++}
++
++func setReferenceVideoDurationProbeTimeoutForTest(t *testing.T, timeout time.Duration) {
++	t.Helper()
++	original := referenceVideoDurationProbeTimeout
++	referenceVideoDurationProbeTimeout = timeout
++	t.Cleanup(func() {
++		referenceVideoDurationProbeTimeout = original
++	})
++}
++
++func referenceVideoRequestBody(modelName string, videoURLs ...string) string {
++	if len(videoURLs) == 0 {
++		videoURLs = []string{"https://example.com/reference.mp4"}
++	}
++	var items strings.Builder
++	for _, videoURL := range videoURLs {
++		items.WriteString(`,
++			{
++				"type": "video_url",
++				"role": "reference_video",
++				"video_url": {"url": "` + videoURL + `"}
++			}`)
++	}
++	return `{
++		"model": "` + modelName + `",
++		"duration": 10,
++		"generate_audio": true,
++		"ratio": "16:9",
++		"prompt": "placeholder",
++		"content": [
++			{"type": "text", "text": "keep identity"}` + items.String() + `
++		]
++	}`
++}
++
++func newRangeVideoServer(t *testing.T, videoBytes []byte) *httptest.Server {
++	t.Helper()
++	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Header.Get("Range") != "" {
++			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(videoBytes)-1, len(videoBytes)))
++			w.WriteHeader(http.StatusPartialContent)
++		}
++		_, _ = w.Write(videoBytes)
++	}))
++}
++
++func minimalMP4(t *testing.T, durationSeconds uint32) []byte {
++	t.Helper()
++	var out []byte
++	out = append(out, mp4Box("ftyp", []byte("isom\x00\x00\x00\x00isom"))...)
++	out = append(out, mp4Box("moov", minimalMvhd(t, 1000, durationSeconds*1000))...)
++	return out
++}
++
++func appendMinimalMP4AfterPayload(t *testing.T, durationSeconds uint32, payload []byte) []byte {
++	t.Helper()
++	var out []byte
++	out = append(out, mp4Box("ftyp", []byte("isom\x00\x00\x00\x00isom"))...)
++	out = append(out, mp4Box("mdat", payload)...)
++	out = append(out, mp4Box("moov", minimalMvhd(t, 1000, durationSeconds*1000))...)
++	return out
++}
++
++func minimalMvhd(t *testing.T, timescale uint32, duration uint32) []byte {
++	t.Helper()
++	buf := &bytes.Buffer{}
++	writeU32(t, buf, 0)
++	writeU32(t, buf, 0)
++	writeU32(t, buf, 0)
++	writeU32(t, buf, timescale)
++	writeU32(t, buf, duration)
++	writeU32(t, buf, 0x00010000)
++	writeU16(t, buf, 0x0100)
++	writeU16(t, buf, 0)
++	writeU32(t, buf, 0)
++	writeU32(t, buf, 0)
++	for _, v := range []uint32{0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000} {
++		writeU32(t, buf, v)
++	}
++	for i := 0; i < 6; i++ {
++		writeU32(t, buf, 0)
++	}
++	writeU32(t, buf, 2)
++	return mp4Box("mvhd", buf.Bytes())
++}
++
++func mp4Box(name string, payload []byte) []byte {
++	buf := &bytes.Buffer{}
++	_ = binary.Write(buf, binary.BigEndian, uint32(len(payload)+8))
++	_, _ = io.WriteString(buf, name)
++	_, _ = buf.Write(payload)
++	return buf.Bytes()
++}
++
++func writeU32(t *testing.T, buf *bytes.Buffer, v uint32) {
++	t.Helper()
++	if err := binary.Write(buf, binary.BigEndian, v); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func writeU16(t *testing.T, buf *bytes.Buffer, v uint16) {
++	t.Helper()
++	if err := binary.Write(buf, binary.BigEndian, v); err != nil {
++		t.Fatal(err)
++	}
++}
 diff --git a/docs/customizations/README.md b/docs/customizations/README.md
 new file mode 100644
-index 000000000..5ce929c6e
+index 0000000..c752502
 --- /dev/null
 +++ b/docs/customizations/README.md
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,94 @@
 +# 二开总览
 +
 +本仓库基于上游 `new-api` 维护，优先保持主线贴近上游。
@@ -338,8 +636,8 @@ index 000000000..5ce929c6e
 +
 +### 007-seedance-reference-video-double-price
 +
-+- 目标：Seedance/Doubao 视频任务中，环境变量白名单模型携带参考视频时按双倍计费
-+- 影响范围：Doubao 视频任务计费估算、启动环境变量加载、任务 `OtherRatios`
++- 目标：通过 Sora/OpenAI 视频任务路径接入的 Seedance 模型，环境变量白名单模型携带参考视频时按双倍计费
++- 影响范围：Sora 视频任务计费估算、Seedance 顶层参考视频字段检测、任务 `OtherRatios`
 +- 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
 +
 +## 上游同步标准流程
@@ -367,7 +665,6 @@ index 000000000..5ce929c6e
 +go test ./common -run TestMaskBillingAmountsForClient -count=1
 +go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
 +go test ./relay/channel/task/sora ./relay/common -count=1
-+go test ./relay/channel/task/doubao -count=1
 +go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
 +go test . -run TestInjectFrontendLockPassword -count=1
 +(cd web && bun run build)
@@ -377,10 +674,10 @@ index 000000000..5ce929c6e
 +默认 patch 校验基准是当前项目锁定的原版 new-api：`22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。验证其他上游基准时显式设置 `PATCH_BASE_REF`。
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 000000000..b653c1f36
+index 0000000..42ea488
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,441 @@
 +# 二开补丁（Custom Patches）
 +
 +本目录存放在上游 new-api 基础上的二开功能补丁。每次同步上游代码后，按序号重新应用即可。
@@ -778,44 +1075,40 @@ index 000000000..b653c1f36
 +
 +## 007-seedance-reference-video-double-price.patch
 +
-+**功能**：Seedance/Doubao 视频任务中，白名单模型携带参考视频时按双倍计费。
++**功能**：通过 Sora/OpenAI 视频任务路径接入的 Seedance 模型，白名单模型携带参考视频时按双倍计费。
 +
-+**背景**：Seedance/Doubao 已支持 OpenAI Videos 风格 `/v1/videos` 请求。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等字段携带参考视频，这类请求需要与普通文生视频区分计费。
++**背景**：Seedance 在当前部署中复用 NewAPI 的 Sora/OpenAI 视频任务机制，上游兼容 `/v1/videos`。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等顶层字段携带参考视频，这类请求需要与普通文生视频区分计费。
 +
-+**涉及文件（7 个）**：
++**涉及文件（6 个）**：
 +
-+### 1. `relay/channel/task/doubao/constants.go`
++### 1. `relay/channel/task/sora/constants.go`
 +
-+新增 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 环境变量白名单加载逻辑。默认白名单为空。
++将 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 合并到 Sora 参考视频双倍计费白名单。默认白名单为空。
 +
-+### 2. `main.go`
++### 2. `relay/channel/task/sora/adaptor.go`
 +
-+在 `.env` 和 `common.InitEnv()` 之后调用 `doubaotask.ReloadReferenceVideoDoublePriceModelsFromEnv()`。
++在 `EstimateBilling` 中识别 OpenAI Videos 顶层参考视频字段，命中白名单模型后返回 `video_input: 2`；保留原有 `content[].video_url` 视频输入计费路径。
 +
-+### 3. `relay/channel/task/doubao/adaptor.go`
++### 3. `relay/channel/task/sora/adaptor_test.go`
 +
-+按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`。在 `EstimateBilling` 中识别白名单模型和参考视频字段，命中后返回 `video_input: 2`；保留原有 `metadata.content` 视频输入计费路径。
++覆盖 Seedance 白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、Seedance 白名单加载，以及 Sora JSON 请求体字段透传。
 +
-+### 4. `relay/channel/task/doubao/adaptor_test.go`
-+
-+覆盖白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、原 metadata 视频输入倍率不回退、白名单 metadata 视频按双倍计费，以及两个渠道请求体/URL 分流。
-+
-+### 5. `docs/customizations/007-seedance-reference-video-double-price.md`
++### 4. `docs/customizations/007-seedance-reference-video-double-price.md`
 +
 +记录二开背景、业务规则、风险和验证命令。
 +
-+### 6. `docs/customizations/README.md`
++### 5. `docs/customizations/README.md`
 +
 +登记 007 二开。
 +
-+### 7. `patches/README.md`
++### 6. `patches/README.md`
 +
 +登记 007 补丁。
 +
 +### 回归验证
 +
 +```bash
-+go test ./relay/channel/task/doubao
++go test ./relay/channel/task/sora
 +make verify-patches
 +```
 +
@@ -828,15 +1121,17 @@ index 000000000..b653c1f36
 +3. **更新上游后**：先 `git apply`，失败则按文档手动改，最后 `git diff > patches/NNN-xxx.patch` 更新补丁文件
 diff --git a/docs/customizations/007-seedance-reference-video-double-price.md b/docs/customizations/007-seedance-reference-video-double-price.md
 new file mode 100644
-index 000000000..5d19ac08c
+index 0000000..1a5c188
 --- /dev/null
 +++ b/docs/customizations/007-seedance-reference-video-double-price.md
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,113 @@
 +# 007-seedance-reference-video-double-price
 +
 +## 1. 背景
 +
-+Seedance/Doubao 视频生成渠道支持 OpenAI Videos 风格 `/v1/videos` 请求。下游请求体可通过顶层字段携带参考视频，例如：
++Seedance 视频生成在当前部署中通过 NewAPI 的 `Sora` / `OpenAI` 视频任务机制接入：后台渠道类型仍选择 `Sora` 或 `OpenAI`，上游 Base URL 指向兼容 `/v1/videos` 的 Seedance 服务。
++
++客户端请求体可通过 OpenAI Videos 风格顶层字段携带参考视频，例如：
 +
 +```json
 +{
@@ -846,27 +1141,30 @@ index 000000000..5d19ac08c
 +}
 +```
 +
-+这类视频参考请求需要与普通文生视频区分计费。此前 Sora 兼容渠道已有参考视频双倍计费和精确按秒计费能力；本定制只为 Seedance/Doubao 增加简单双倍计费，不启用精确按秒规则。
++这类视频参考请求需要与普通文生视频区分计费。此前 Sora 兼容渠道已有 `content[].video_url` 双倍计费和精确按秒计费能力；本定制只为 Seedance 顶层参考视频字段增加简单双倍计费，不启用新的按秒规则。
 +
 +## 2. 目标
 +
-+- 仅在 Seedance/Doubao 视频任务适配器中生效
-+- `DoubaoVideo` 渠道走 Seedance OpenAI Videos 顶层字段格式；`VolcEngine` 渠道继续保留旧 Doubao `content[]` 请求格式
++- 在实际使用的 `Sora` / `OpenAI` 视频任务适配器路径中生效
++- 不要求后台新增或选择 `DoubaoVideo` 渠道类型
 +- 仅当模型名在环境变量白名单内时生效
 +- 识别 OpenAI Videos 风格顶层参考视频字段
 +- 命中后通过现有 `OtherRatios` 机制追加 `video_input: 2`
-+- 保留原有 `metadata.content` 中 `video_url` 的视频输入计费逻辑
++- 保留原有 Sora `content[].video_url` 参考视频计费逻辑
++- 保留 Doubao/VolcEngine 旧 `metadata.content` 计费逻辑，不改其上游请求格式
 +
 +不解决：
 +
 +- 不新增后台配置页面
-+- 不下载或解析参考视频时长
-+- 不改变其他渠道的参考视频计费
++- 不下载或解析 Seedance 顶层参考视频时长
++- 不改变其他非白名单模型的计费
 +
 +## 3. 业务规则
 +
-+- 模型白名单环境变量：`SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS`
-+- 模型白名单默认值为空，不配置时任何模型都不会触发 Seedance 参考视频双倍计费
++- Seedance 模型白名单环境变量：`SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS`
++- 该变量会并入 Sora 任务适配器的参考视频双倍计费白名单
++- 原 Sora 白名单 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 继续生效
++- 模型白名单默认值为空，不配置时任何 Seedance 模型都不会触发本定制双倍计费
 +- 多个模型用英文逗号分隔，例如：
 +
 +```bash
@@ -879,33 +1177,33 @@ index 000000000..5d19ac08c
 +  - `video_url` 存在非空 URL 字符串或数组项
 +  - `reference_video` 存在非空 URL 字符串或数组项
 +  - `files` 中存在明显视频扩展名 URL，例如 `.mp4`、`.mov`、`.webm`
-+- OpenAI Videos 风格顶层字段仅在 `DoubaoVideo` 渠道参与计费判断；`VolcEngine` 旧渠道不会因为顶层 `input_video` / `files` 等字段触发双倍计费
 +- `files` 中只有图片或音频 URL 时不触发双倍计费
-+- 已有 `metadata.content` 中 `video_url` 的视频输入识别保留：
++- Sora 适配器会把 JSON 请求体按原始 map 透传给上游，只替换映射后的 `model`，因此上述顶层字段会正常传到 Seedance 上游
++- 原有 `content[].video_url` 中的视频输入识别保留：
 +  - 白名单模型按 `video_input: 2`
-+  - 非白名单模型继续使用原 `videoInputRatioMap` 中的模型专属倍率
++  - 开启 Sora 精确按秒计费时继续走原有秒数探测逻辑
 +
 +## 4. 影响范围
 +
-+- `relay/channel/task/doubao/constants.go`
-+  - 从 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 加载参考视频双倍计费模型白名单
++- `relay/channel/task/sora/constants.go`
++  - 从 `SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 加载 Seedance 模型白名单，并合并到 Sora 参考视频计费白名单
++- `relay/channel/task/sora/adaptor.go`
++  - 在 `EstimateBilling` 中识别白名单模型和 OpenAI Videos 顶层参考视频字段
++  - 命中顶层参考视频时返回 `video_input: 2`
++  - 保留原有 `content[].video_url` 视频输入计费路径
++- `relay/channel/task/sora/adaptor_test.go`
++  - 覆盖 Seedance 白名单、顶层视频字段、图片/音频非视频字段、未配置白名单、请求体字段透传
 +- `main.go`
-+  - 在 `.env` 加载和 `common.InitEnv()` 之后显式刷新 Seedance/Doubao 参考视频计费白名单
-+- `relay/channel/task/doubao/adaptor.go`
-+  - 按渠道类型分流上游请求：`DoubaoVideo` 使用 `/v1/videos` 并保留顶层 `files` / `input_video` 等字段；`VolcEngine` 使用旧 `/api/v3/contents/generations/tasks`
-+  - 在 `EstimateBilling` 中识别白名单模型和参考视频字段
-+  - 命中 OpenAI Videos 风格参考视频时返回 `video_input: 2`
-+  - 保留原有 `metadata.content` 视频输入计费路径
-+- `service/task_polling.go`
-+  - 轮询初始化时把渠道类型传给视频适配器，保证查询任务也能按 `DoubaoVideo` / `VolcEngine` 分流
-+- `relay/channel/task/doubao/adaptor_test.go`
-+  - 覆盖白名单、顶层视频字段、图片/音频非视频字段、未配置白名单、原 metadata 路径，以及两个渠道请求体/URL 分流
++  - 继续在 `.env` 加载和 `common.InitEnv()` 之后刷新 Sora 参考视频计费白名单；Seedance 白名单由 Sora reload 一并加载
++- `relay/channel/task/doubao/*`
++  - 不承载本次 Seedance OpenAI Videos 顶层字段计费逻辑，保留旧 VolcEngine/Doubao 行为
 +
 +## 5. 风险点
 +
 +- 白名单在 `.env` 和环境变量加载后刷新，修改后需要重启服务
 +- `files` 通过 URL 扩展名判断是否为视频；无扩展名或扩展名不标准的视频 URL 不会触发
-+- 若未来 Seedance 请求体字段变化，需要扩展识别逻辑
++- `input_video` / `video_url` / `reference_video` 只判断是否存在非空 URL，不探测真实媒体类型
++- 若未来 Seedance 请求体字段变化，需要扩展 Sora 适配器中的识别逻辑
 +- 若模型映射规则改变计费模型名，需要确认白名单使用的是原始请求模型名还是计费模型名
 +
 +## 6. 测试方案
@@ -913,7 +1211,7 @@ index 000000000..5d19ac08c
 +最小验证命令：
 +
 +```bash
-+go test ./relay/channel/task/doubao
++go test ./relay/channel/task/sora
 +```
 +
 +完整二开校验：
@@ -926,8 +1224,8 @@ index 000000000..5d19ac08c
 +
 +上游同步时重点关注：
 +
-+- `relay/channel/task/doubao/adaptor.go` 中 `EstimateBilling` 是否调整
-+- `relay/channel/task/doubao/constants.go` 中模型列表和环境变量加载是否调整
++- `relay/channel/task/sora/adaptor.go` 中 `EstimateBilling` 是否调整
++- `relay/channel/task/sora/constants.go` 中参考视频模型列表和环境变量加载是否调整
 +- `main.go` 中 `.env` / `common.InitEnv()` 的启动顺序是否变化
 +- `relay/relay_task.go` 中 `OtherRatios` 乘算逻辑是否调整
 +
@@ -935,285 +1233,8 @@ index 000000000..5d19ac08c
 +
 +- 已实现环境变量模型白名单限定
 +- 已实现 OpenAI Videos 风格顶层参考视频识别
-+- 已实现 `DoubaoVideo` 新格式和 `VolcEngine` 旧格式分流
++- 已接入实际使用的 Sora/OpenAI 视频任务路径
 +- 已实现参考视频双倍计费
-+- 已保留原 `metadata.content` 视频输入计费逻辑
-+- 已补充 Doubao/Seedance 适配器测试
++- 已保留原 `content[].video_url` 视频输入计费逻辑
++- 已补充 Sora/Seedance 适配器测试
 +- 已生成 `patches/007-seedance-reference-video-double-price.patch`
-diff --git a/relay/channel/task/doubao/adaptor_test.go b/relay/channel/task/doubao/adaptor_test.go
-new file mode 100644
-index 000000000..46a9db25a
---- /dev/null
-+++ b/relay/channel/task/doubao/adaptor_test.go
-@@ -0,0 +1,271 @@
-+package doubao
-+
-+import (
-+	"io"
-+	"net/http/httptest"
-+	"strings"
-+	"testing"
-+
-+	"github.com/QuantumNous/new-api/common"
-+	"github.com/QuantumNous/new-api/constant"
-+	relaycommon "github.com/QuantumNous/new-api/relay/common"
-+	"github.com/gin-gonic/gin"
-+)
-+
-+func TestEstimateBillingDoublePriceForWhitelistedOpenAIVideosReferenceVideo(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	for _, body := range []string{
-+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","input_video":["https://cdn.example.com/ref.mp4"]}`,
-+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","video_url":"https://cdn.example.com/ref.mov"}`,
-+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","reference_video":"https://cdn.example.com/ref.webm"}`,
-+		`{"model":"doubao-seedance-2-0-260128-2","prompt":"p","files":["https://cdn.example.com/ref-image.jpg","https://cdn.example.com/ref-video.mp4"]}`,
-+	} {
-+		ratios := estimateDoubaoBillingForBody(t, body)
-+		if ratios["video_input"] != 2 {
-+			t.Fatalf("expected video_input double price for body %s, got %#v", body, ratios)
-+		}
-+	}
-+}
-+
-+func TestEstimateBillingDoesNotDoublePriceNonVideoFiles(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128-2",
-+		"prompt": "p",
-+		"files": ["https://cdn.example.com/ref.jpg", "https://cdn.example.com/ref.mp3"]
-+	}`
-+	ratios := estimateDoubaoBillingForBody(t, body)
-+	if _, ok := ratios["video_input"]; ok {
-+		t.Fatalf("expected no video_input ratio for image/audio files, got %#v", ratios)
-+	}
-+}
-+
-+func TestEstimateBillingDoesNotDoublePriceWhenModelNotWhitelisted(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128-2",
-+		"prompt": "p",
-+		"input_video": ["https://cdn.example.com/ref.mp4"]
-+	}`
-+	ratios := estimateDoubaoBillingForBody(t, body)
-+	if _, ok := ratios["video_input"]; ok {
-+		t.Fatalf("expected no video_input ratio without env whitelist, got %#v", ratios)
-+	}
-+}
-+
-+func TestEstimateBillingDoesNotDoublePriceTopLevelVideoForLegacyVolcEngine(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128-2")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128-2",
-+		"prompt": "p",
-+		"input_video": ["https://cdn.example.com/ref.mp4"]
-+	}`
-+	ratios := estimateDoubaoBillingForBodyWithChannel(t, body, constant.ChannelTypeVolcEngine)
-+	if _, ok := ratios["video_input"]; ok {
-+		t.Fatalf("expected legacy volcengine top-level input_video not to trigger video_input ratio, got %#v", ratios)
-+	}
-+}
-+
-+func TestEstimateBillingKeepsMetadataVideoInputRatio(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128",
-+		"prompt": "p",
-+		"metadata": {
-+			"content": [
-+				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
-+			]
-+		}
-+	}`
-+	ratios := estimateDoubaoBillingForBody(t, body)
-+	want, _ := GetVideoInputRatio("doubao-seedance-2-0-260128")
-+	if ratios["video_input"] != want {
-+		t.Fatalf("expected metadata video_input ratio %v, got %#v", want, ratios)
-+	}
-+}
-+
-+func TestEstimateBillingDoublePriceForWhitelistedMetadataReferenceVideo(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	t.Setenv("SEEDANCE_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "doubao-seedance-2-0-260128")
-+	ReloadReferenceVideoDoublePriceModelsFromEnv()
-+	t.Cleanup(ReloadReferenceVideoDoublePriceModelsFromEnv)
-+
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128",
-+		"prompt": "p",
-+		"metadata": {
-+			"content": [
-+				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
-+			]
-+		}
-+	}`
-+	ratios := estimateDoubaoBillingForBody(t, body)
-+	if ratios["video_input"] != 2 {
-+		t.Fatalf("expected whitelist metadata video_input double price, got %#v", ratios)
-+	}
-+}
-+
-+func TestBuildRequestBodyKeepsSeedanceOpenAIVideosFields(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128-2",
-+		"prompt": "p",
-+		"seconds": "4",
-+		"aspect_ratio": "16:9",
-+		"files": ["https://cdn.example.com/ref-image.jpg", "https://cdn.example.com/ref-video.mp4"],
-+		"input_video": ["https://cdn.example.com/ref-video-2.mp4"],
-+		"audio": ["https://cdn.example.com/ref-audio.mp3"],
-+		"generate_audio": true,
-+		"resolution": "480p"
-+	}`
-+	c := newDoubaoTaskContext(body)
-+	info := &relaycommon.RelayInfo{
-+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
-+		ChannelMeta: &relaycommon.ChannelMeta{
-+			ChannelType:       constant.ChannelTypeDoubaoVideo,
-+			ChannelBaseUrl:    "https://seedance.example.com",
-+			UpstreamModelName: "mapped-seedance-model",
-+			IsModelMapped:     true,
-+		},
-+	}
-+	adaptor := &TaskAdaptor{}
-+	adaptor.Init(info)
-+	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
-+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
-+	}
-+	url, err := adaptor.BuildRequestURL(info)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	if url != "https://seedance.example.com/v1/videos" {
-+		t.Fatalf("unexpected seedance URL: %s", url)
-+	}
-+	reader, err := adaptor.BuildRequestBody(c, info)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	data, err := io.ReadAll(reader)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	var got map[string]interface{}
-+	if err := common.Unmarshal(data, &got); err != nil {
-+		t.Fatal(err)
-+	}
-+	if got["model"] != "mapped-seedance-model" {
-+		t.Fatalf("expected mapped model, got %v", got["model"])
-+	}
-+	if got["duration"] != "4" {
-+		t.Fatalf("expected seconds to populate duration, got %#v", got["duration"])
-+	}
-+	for _, field := range []string{"files", "input_video", "audio", "aspect_ratio", "generate_audio", "resolution"} {
-+		if _, ok := got[field]; !ok {
-+			t.Fatalf("expected seedance body to keep %s, got %#v", field, got)
-+		}
-+	}
-+}
-+
-+func TestBuildRequestBodyKeepsLegacyVolcEngineFormat(t *testing.T) {
-+	gin.SetMode(gin.TestMode)
-+	body := `{
-+		"model": "doubao-seedance-2-0-260128",
-+		"prompt": "p",
-+		"metadata": {
-+			"content": [
-+				{"type": "video_url", "video_url": {"url": "https://cdn.example.com/ref.mp4"}}
-+			]
-+		}
-+	}`
-+	c := newDoubaoTaskContext(body)
-+	info := &relaycommon.RelayInfo{
-+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
-+		ChannelMeta: &relaycommon.ChannelMeta{
-+			ChannelType:    constant.ChannelTypeVolcEngine,
-+			ChannelBaseUrl: "https://ark.cn-beijing.volces.com",
-+		},
-+	}
-+	adaptor := &TaskAdaptor{}
-+	adaptor.Init(info)
-+	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
-+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
-+	}
-+	url, err := adaptor.BuildRequestURL(info)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	if url != "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks" {
-+		t.Fatalf("unexpected legacy URL: %s", url)
-+	}
-+	reader, err := adaptor.BuildRequestBody(c, info)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	data, err := io.ReadAll(reader)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	var got map[string]interface{}
-+	if err := common.Unmarshal(data, &got); err != nil {
-+		t.Fatal(err)
-+	}
-+	if _, ok := got["content"]; !ok {
-+		t.Fatalf("expected legacy body to contain content, got %#v", got)
-+	}
-+	if _, ok := got["files"]; ok {
-+		t.Fatalf("expected legacy body not to pass files through, got %#v", got)
-+	}
-+}
-+
-+func estimateDoubaoBillingForBody(t *testing.T, body string) map[string]float64 {
-+	t.Helper()
-+	return estimateDoubaoBillingForBodyWithChannel(t, body, constant.ChannelTypeDoubaoVideo)
-+}
-+
-+func estimateDoubaoBillingForBodyWithChannel(t *testing.T, body string, channelType int) map[string]float64 {
-+	t.Helper()
-+	c := newDoubaoTaskContext(body)
-+	info := &relaycommon.RelayInfo{
-+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
-+		ChannelMeta: &relaycommon.ChannelMeta{
-+			ChannelType: channelType,
-+		},
-+	}
-+	adaptor := &TaskAdaptor{}
-+	adaptor.Init(info)
-+	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
-+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
-+	}
-+	ratios := adaptor.EstimateBilling(c, info)
-+	if ratios == nil {
-+		return map[string]float64{}
-+	}
-+	return ratios
-+}
-+
-+func newDoubaoTaskContext(body string) *gin.Context {
-+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-+	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(body))
-+	req.Header.Set("Content-Type", "application/json")
-+	c.Request = req
-+	return c
-+}
