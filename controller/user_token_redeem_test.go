@@ -51,6 +51,8 @@ func TestMain(m *testing.M) {
 func truncateTables(t *testing.T) {
 	t.Helper()
 	require.NoError(t, model.DB.Exec("DELETE FROM redemptions").Error)
+	require.NoError(t, model.DB.Exec("DELETE FROM tasks").Error)
+	require.NoError(t, model.DB.Exec("DELETE FROM channels").Error)
 	require.NoError(t, model.DB.Exec("DELETE FROM tokens").Error)
 	require.NoError(t, model.DB.Exec("DELETE FROM users").Error)
 	require.NoError(t, model.DB.Exec("DELETE FROM logs").Error)

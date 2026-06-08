@@ -2,11 +2,14 @@ package sora
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -38,6 +41,8 @@ type ContentItem struct {
 type ImageURL struct {
 	URL string `json:"url"`
 }
+
+const seedanceAssetModel = "seedance-asset"
 
 type responseTask struct {
 	ID                 string `json:"id"`
@@ -88,9 +93,35 @@ func validateRemixRequest(c *gin.Context) *dto.TaskError {
 	return nil
 }
 
+func validateSeedanceAssetRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	var req relaycommon.TaskSubmitReq
+	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if strings.TrimSpace(req.Model) != seedanceAssetModel {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("model field is invalid"), "invalid_request", http.StatusBadRequest)
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("field prompt is required"), "invalid_request", http.StatusBadRequest)
+	}
+	imageURL := firstSeedanceAssetImageURL(req)
+	if imageURL == "" {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("image url is required"), "invalid_request", http.StatusBadRequest)
+	}
+	if err := validateSeedanceAssetURL(imageURL); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	info.Action = constant.TaskActionGenerate
+	c.Set("task_request", req)
+	return nil
+}
+
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
 	if info.Action == constant.TaskActionRemix {
 		return validateRemixRequest(c)
+	}
+	if isSeedanceAssetRequest(c) {
+		return validateSeedanceAssetRequest(c, info)
 	}
 	if taskErr := relaycommon.ValidateMultipartDirect(c, info); taskErr != nil {
 		return taskErr
@@ -110,6 +141,9 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {
+		return nil
+	}
+	if req.Model == seedanceAssetModel {
 		return nil
 	}
 
@@ -157,6 +191,9 @@ func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *
 	if err != nil {
 		return nil
 	}
+	if req.Model == seedanceAssetModel {
+		return nil
+	}
 	if !shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) {
 		return nil
 	}
@@ -175,6 +212,60 @@ func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *
 		return service.TaskErrorWrapperLocal(err, "reference_video_duration_unavailable", http.StatusBadRequest)
 	}
 	setReferenceVideoTotalSeconds(c, totalSeconds)
+	return nil
+}
+
+func isSeedanceAssetRequest(c *gin.Context) bool {
+	var req relaycommon.TaskSubmitReq
+	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
+		return false
+	}
+	return strings.TrimSpace(req.Model) == seedanceAssetModel
+}
+
+func firstSeedanceAssetImageURL(req relaycommon.TaskSubmitReq) string {
+	if s := strings.TrimSpace(req.InputReference); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(req.Image); s != "" {
+		return s
+	}
+	for _, image := range req.Images {
+		if s := strings.TrimSpace(image); s != "" {
+			return s
+		}
+	}
+	for _, file := range req.Files {
+		if s := strings.TrimSpace(file); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func validateSeedanceAssetURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("image url must be a public http or https URL")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("image url must be a public http or https URL")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("image url host is required")
+	}
+	lowerHost := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("image url host is not allowed")
+	}
+	if strings.Contains(lowerHost, "%") {
+		return fmt.Errorf("image url host is not allowed")
+	}
+	if ip := net.ParseIP(lowerHost); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()) {
+		return fmt.Errorf("image url host is not allowed")
+	}
 	return nil
 }
 
@@ -381,11 +472,23 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 
-	// 使用公开 task_xxxx ID 返回给客户端
-	dResp.ID = info.PublicTaskID
-	dResp.TaskID = info.PublicTaskID
-	c.JSON(http.StatusOK, dResp)
+	publicBody, err := publicVideoResponseBody(responseBody, info.PublicTaskID)
+	if err != nil {
+		taskErr = service.TaskErrorWrapper(err, "build_response_body_failed", http.StatusInternalServerError)
+		return
+	}
+	c.Data(http.StatusOK, "application/json", publicBody)
 	return upstreamID, responseBody, nil
+}
+
+func publicVideoResponseBody(responseBody []byte, publicTaskID string) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(responseBody, &raw); err != nil {
+		return nil, err
+	}
+	raw["id"] = publicTaskID
+	raw["task_id"] = publicTaskID
+	return json.Marshal(raw)
 }
 
 // FetchTask fetch task status
@@ -458,6 +561,9 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	var err error
 	if data, err = sjson.SetBytes(data, "id", task.TaskID); err != nil {
 		return nil, errors.Wrap(err, "set id failed")
+	}
+	if data, err = sjson.SetBytes(data, "task_id", task.TaskID); err != nil {
+		return nil, errors.Wrap(err, "set task_id failed")
 	}
 	return data, nil
 }

@@ -60,6 +60,12 @@
 - 影响范围：Sora 视频任务计费估算、Seedance 顶层参考视频字段检测、任务 `OtherRatios`
 - 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
 
+### 008-seedance-asset-library-videos
+
+- 目标：复用 `/v1/videos` 异步任务链路，通过 `seedance-asset` 模型提交 Seedance 真人形象资产库任务并查询 `AssetId`
+- 影响范围：Sora/OpenAI 视频任务校验、资产任务计费倍率、公开任务 ID 响应重写、任务请求结构
+- 当前状态：已实现，并已生成 `patches/008-seedance-asset-library-videos.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`

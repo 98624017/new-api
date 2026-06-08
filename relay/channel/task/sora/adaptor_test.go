@@ -3,6 +3,7 @@ package sora
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	commonjson "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -33,6 +35,119 @@ func TestEstimateBillingDefaultsToDoublePriceWhenEnvConfiguredModelHasReferenceV
 	}
 	if ratios["video_input"] != 2 {
 		t.Fatalf("expected default video_input double-price ratio, got %#v", ratios)
+	}
+}
+
+func TestSeedanceAssetSkipsVideoBillingRatios(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ratios := estimateBillingForBody(t, `{
+		"model": "seedance-asset",
+		"prompt": "林春芽",
+		"seconds": "10",
+		"size": "1792x1024",
+		"files": ["https://asset.test/person.jpg"]
+	}`)
+	if len(ratios) != 0 {
+		t.Fatalf("expected no ratios for seedance asset, got %#v", ratios)
+	}
+}
+
+func TestSeedanceAssetRejectsUnsafeURLs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, imageURL := range []string{
+		"http://127.0.0.1/person.jpg",
+		"http://[fe80::1%25eth0]/person.jpg",
+	} {
+		taskErr := validateBody(t, fmt.Sprintf(`{
+			"model": "seedance-asset",
+			"prompt": "林春芽",
+			"input_reference": %q
+		}`, imageURL))
+		if taskErr == nil {
+			t.Fatalf("expected unsafe URL %q to be rejected", imageURL)
+		}
+		if taskErr.Code != "invalid_request" {
+			t.Fatalf("code=%s message=%s", taskErr.Code, taskErr.Message)
+		}
+	}
+}
+
+func TestSeedanceAssetAcceptsFilesURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	taskErr := validateBody(t, `{
+		"model": "seedance-asset",
+		"prompt": "林春芽",
+		"files": ["https://asset.test/person.jpg"]
+	}`)
+	if taskErr != nil {
+		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
+	}
+}
+
+func TestDoResponsePreservesAssetFieldsWhenReplacingPublicTaskID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{PublicTaskID: "task_public"}}
+	adaptor := &TaskAdaptor{}
+	resp := &http.Response{
+		Body: io.NopCloser(strings.NewReader(`{
+			"id":"asset_req_1780830000_abcdef123456",
+			"task_id":"asset_req_1780830000_abcdef123456",
+			"object":"video",
+			"model":"seedance-asset",
+			"status":"queued",
+			"progress":0,
+			"asset_id":"asset-123",
+			"metadata":{"seedance":{"asset_id":"asset-123","kind":"asset"}}
+		}`)),
+	}
+
+	upstreamID, taskData, taskErr := adaptor.DoResponse(c, resp, info)
+	if taskErr != nil {
+		t.Fatalf("DoResponse taskErr = %v", taskErr)
+	}
+	if upstreamID != "asset_req_1780830000_abcdef123456" {
+		t.Fatalf("upstreamID = %q", upstreamID)
+	}
+	if !strings.Contains(string(taskData), `"asset_id":"asset-123"`) {
+		t.Fatalf("taskData lost asset_id: %s", string(taskData))
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response JSON error = %v body=%s", err, rec.Body.String())
+	}
+	if out["id"] != "task_public" || out["task_id"] != "task_public" || out["asset_id"] != "asset-123" {
+		t.Fatalf("unexpected response: %#v", out)
+	}
+}
+
+func TestConvertToOpenAIVideoReplacesAssetTaskIDs(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+	task := &model.Task{
+		TaskID: "task_public",
+		Data: []byte(`{
+			"id":"asset_req_1780830000_abcdef123456",
+			"task_id":"asset_req_1780830000_abcdef123456",
+			"object":"video",
+			"model":"seedance-asset",
+			"status":"completed",
+			"progress":100,
+			"asset_id":"asset-123",
+			"metadata":{"seedance":{"asset_id":"asset-123","kind":"asset"}}
+		}`),
+	}
+
+	body, err := adaptor.ConvertToOpenAIVideo(task)
+	if err != nil {
+		t.Fatalf("ConvertToOpenAIVideo error = %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response JSON error = %v body=%s", err, string(body))
+	}
+	if out["id"] != "task_public" || out["task_id"] != "task_public" || out["asset_id"] != "asset-123" {
+		t.Fatalf("unexpected response: %#v", out)
 	}
 }
 

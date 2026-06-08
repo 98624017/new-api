@@ -326,6 +326,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)
 			taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
+			taskRoute.POST("/token/asset/delete", middleware.TokenAuthReadOnly(), controller.DeleteUserTokenAsset)
 			taskRoute.GET("/", middleware.AdminAuth(), controller.GetAllTask)
 		}
 

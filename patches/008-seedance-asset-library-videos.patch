@@ -1,0 +1,961 @@
+diff --git a/controller/task.go b/controller/task.go
+index 6b91f701b..4782d7dbf 100644
+--- a/controller/task.go
++++ b/controller/task.go
+@@ -1,7 +1,13 @@
+ package controller
+ 
+ import (
++	"bytes"
++	"fmt"
++	"io"
++	"net/http"
+ 	"strconv"
++	"strings"
++	"time"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+@@ -91,6 +97,193 @@ func GetUserTokenTask(c *gin.Context) {
+ 	common.ApiSuccess(c, pageInfo)
+ }
+ 
++type deleteUserTokenAssetRequest struct {
++	TaskID string `json:"task_id"`
++}
++
++type seedanceAssetTaskData struct {
++	Model     string `json:"model,omitempty"`
++	AssetID   string `json:"asset_id,omitempty"`
++	AssetURI  string `json:"asset_uri,omitempty"`
++	Deleted   bool   `json:"deleted,omitempty"`
++	DeletedAt int64  `json:"deleted_at,omitempty"`
++	Metadata  struct {
++		Seedance struct {
++			Kind      string `json:"kind,omitempty"`
++			AssetID   string `json:"asset_id,omitempty"`
++			AssetURI  string `json:"asset_uri,omitempty"`
++			Deleted   bool   `json:"deleted,omitempty"`
++			DeletedAt int64  `json:"deleted_at,omitempty"`
++		} `json:"seedance,omitempty"`
++	} `json:"metadata,omitempty"`
++}
++
++func DeleteUserTokenAsset(c *gin.Context) {
++	var req deleteUserTokenAssetRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		common.ApiError(c, fmt.Errorf("invalid request body"))
++		return
++	}
++	req.TaskID = strings.TrimSpace(req.TaskID)
++	if req.TaskID == "" {
++		common.ApiError(c, fmt.Errorf("task_id is required"))
++		return
++	}
++
++	userId := c.GetInt("id")
++	tokenId := c.GetInt("token_id")
++	task, exist, err := model.GetByUserTokenTaskId(userId, tokenId, req.TaskID)
++	if err != nil {
++		common.ApiError(c, err)
++		return
++	}
++	if !exist {
++		common.ApiError(c, fmt.Errorf("task not found"))
++		return
++	}
++
++	assetData, err := validateDeletableSeedanceAsset(task)
++	if err != nil {
++		common.ApiError(c, err)
++		return
++	}
++	if err := deleteUpstreamSeedanceAsset(task); err != nil {
++		common.ApiError(c, err)
++		return
++	}
++
++	deletedAt := time.Now().Unix()
++	if err := markSeedanceAssetDeleted(task, deletedAt); err != nil {
++		common.ApiError(c, err)
++		return
++	}
++
++	common.ApiSuccess(c, gin.H{
++		"task_id":    task.TaskID,
++		"deleted":    true,
++		"deleted_at": deletedAt,
++		"asset_id":   firstNonEmpty(assetData.AssetID, assetData.Metadata.Seedance.AssetID),
++		"asset_uri":  firstNonEmpty(assetData.AssetURI, assetData.Metadata.Seedance.AssetURI),
++	})
++}
++
++func validateDeletableSeedanceAsset(task *model.Task) (*seedanceAssetTaskData, error) {
++	if task.Status != model.TaskStatusSuccess {
++		return nil, fmt.Errorf("only successful asset tasks can be deleted")
++	}
++	var data seedanceAssetTaskData
++	if len(task.Data) > 0 {
++		if err := common.Unmarshal(task.Data, &data); err != nil {
++			return nil, fmt.Errorf("invalid task data")
++		}
++	}
++	if data.Deleted || data.Metadata.Seedance.Deleted {
++		return nil, fmt.Errorf("asset already deleted")
++	}
++	if !isSeedanceAssetTask(task, &data) {
++		return nil, fmt.Errorf("task is not a seedance asset")
++	}
++	return &data, nil
++}
++
++func isSeedanceAssetTask(task *model.Task, data *seedanceAssetTaskData) bool {
++	return strings.TrimSpace(data.Model) == "seedance-asset" ||
++		strings.TrimSpace(task.Properties.OriginModelName) == "seedance-asset" ||
++		strings.TrimSpace(data.Metadata.Seedance.Kind) == "asset"
++}
++
++func deleteUpstreamSeedanceAsset(task *model.Task) error {
++	channel, err := model.GetChannelById(task.ChannelId, true)
++	if err != nil {
++		return fmt.Errorf("get channel failed: %w", err)
++	}
++	key, _, newAPIError := channel.GetNextEnabledKey()
++	if newAPIError != nil {
++		return fmt.Errorf("get channel key failed: %w", newAPIError)
++	}
++	baseURL := strings.TrimRight(channel.GetBaseURL(), "/")
++	if baseURL == "" {
++		return fmt.Errorf("channel base_url is empty")
++	}
++	upstreamTaskID := strings.TrimSpace(task.GetUpstreamTaskID())
++	if upstreamTaskID == "" {
++		return fmt.Errorf("upstream task_id is missing")
++	}
++	body, err := common.Marshal(map[string]any{"task_id": upstreamTaskID})
++	if err != nil {
++		return err
++	}
++	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/task/token/asset/delete", baseURL), bytes.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Authorization", "Bearer "+key)
++	req.Header.Set("Content-Type", "application/json")
++
++	client, err := service.GetHttpClientWithProxy(channel.GetSetting().Proxy)
++	if err != nil {
++		return err
++	}
++	if client == nil {
++		client = http.DefaultClient
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return fmt.Errorf("seedance asset delete failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
++	}
++	return nil
++}
++
++func markSeedanceAssetDeleted(task *model.Task, deletedAt int64) error {
++	var raw map[string]any
++	if len(task.Data) > 0 {
++		if err := common.Unmarshal(task.Data, &raw); err != nil {
++			return fmt.Errorf("invalid task data")
++		}
++	}
++	if raw == nil {
++		raw = map[string]any{}
++	}
++	raw["deleted"] = true
++	raw["deleted_at"] = deletedAt
++
++	metadata := ensureMap(raw, "metadata")
++	seedance := ensureMap(metadata, "seedance")
++	seedance["deleted"] = true
++	seedance["deleted_at"] = deletedAt
++
++	body, err := common.Marshal(raw)
++	if err != nil {
++		return err
++	}
++	task.Data = bytes.TrimSpace(body)
++	return task.Update()
++}
++
++func ensureMap(parent map[string]any, key string) map[string]any {
++	if existing, ok := parent[key].(map[string]any); ok {
++		return existing
++	}
++	next := map[string]any{}
++	parent[key] = next
++	return next
++}
++
++func firstNonEmpty(values ...string) string {
++	for _, value := range values {
++		value = strings.TrimSpace(value)
++		if value != "" {
++			return value
++		}
++	}
++	return ""
++}
++
+ func tasksToDto(tasks []*model.Task, fillUser bool) []*dto.TaskDto {
+ 	var userIdMap map[int]*model.UserBase
+ 	if fillUser {
+diff --git a/controller/task_token_test.go b/controller/task_token_test.go
+index 9733a46d3..5df1b4e71 100644
+--- a/controller/task_token_test.go
++++ b/controller/task_token_test.go
+@@ -1,8 +1,11 @@
+ package controller_test
+ 
+ import (
++	"bytes"
++	"encoding/json"
+ 	"net/http"
+ 	"net/http/httptest"
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+@@ -28,6 +31,7 @@ type taskResponseItem struct {
+ func makeTokenTaskRouter() *gin.Engine {
+ 	router := gin.New()
+ 	router.GET("/api/task/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
++	router.POST("/api/task/token/asset/delete", middleware.TokenAuthReadOnly(), controller.DeleteUserTokenAsset)
+ 	return router
+ }
+ 
+@@ -71,6 +75,48 @@ func seedAsyncTask(t *testing.T, taskID string, userID int, tokenID int, status
+ 	require.NoError(t, model.DB.Create(task).Error)
+ }
+ 
++func seedAssetTask(t *testing.T, taskID string, upstreamTaskID string, userID int, tokenID int, channelID int, status model.TaskStatus, data map[string]any) {
++	t.Helper()
++
++	originModel := "seedance-asset"
++	if modelName, ok := data["model"].(string); ok && strings.TrimSpace(modelName) != "" {
++		originModel = strings.TrimSpace(modelName)
++	}
++	task := &model.Task{
++		TaskID:    taskID,
++		UserId:    userID,
++		TokenId:   tokenID,
++		ChannelId: channelID,
++		Platform:  constant.TaskPlatform("openai"),
++		Action:    "generate",
++		Status:    status,
++		Progress:  "100%",
++		Properties: model.Properties{
++			OriginModelName: originModel,
++		},
++		PrivateData: model.TaskPrivateData{
++			TokenId:        tokenID,
++			UpstreamTaskID: upstreamTaskID,
++		},
++	}
++	task.SetData(data)
++	require.NoError(t, model.DB.Create(task).Error)
++}
++
++func seedTaskChannel(t *testing.T, id int, baseURL string, key string) {
++	t.Helper()
++
++	channel := &model.Channel{
++		Id:     id,
++		Type:   constant.ChannelTypeSora,
++		Key:    key,
++		Status: common.ChannelStatusEnabled,
++		Name:   "seedance proxy",
++	}
++	channel.BaseURL = &baseURL
++	require.NoError(t, model.DB.Create(channel).Error)
++}
++
+ func decodeTaskPageResponse(t *testing.T, body []byte) taskPageResponse {
+ 	t.Helper()
+ 
+@@ -92,6 +138,38 @@ func getTaskTokenIDForTest(t *testing.T, taskID string) int {
+ 	return task.TokenId
+ }
+ 
++func performDeleteAssetRequest(t *testing.T, router *gin.Engine, auth string, taskID string) *httptest.ResponseRecorder {
++	t.Helper()
++
++	body, err := common.Marshal(map[string]any{"task_id": taskID})
++	require.NoError(t, err)
++	req := httptest.NewRequest(http.MethodPost, "/api/task/token/asset/delete", bytes.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("Accept-Language", "zh-CN")
++	if auth != "" {
++		req.Header.Set("Authorization", auth)
++	}
++
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, req)
++	return w
++}
++
++func decodeGenericAPIResponse(t *testing.T, body []byte) struct {
++	Success bool            `json:"success"`
++	Message string          `json:"message"`
++	Data    json.RawMessage `json:"data"`
++} {
++	t.Helper()
++	var resp struct {
++		Success bool            `json:"success"`
++		Message string          `json:"message"`
++		Data    json.RawMessage `json:"data"`
++	}
++	require.NoError(t, common.Unmarshal(body, &resp))
++	return resp
++}
++
+ func TestGetUserTokenTask_ListOnlyCurrentTokenTasks(t *testing.T) {
+ 	truncateTables(t)
+ 
+@@ -147,3 +225,169 @@ func TestGetUserTokenTask_SupportsTaskIDFilter(t *testing.T) {
+ 	assert.Equal(t, "task-filter-hit", page.Items[0].TaskID)
+ 	assert.Equal(t, string(model.TaskStatusSuccess), page.Items[0].Status)
+ }
++
++func TestDeleteUserTokenAsset_DeletesCurrentTokenAssetAndMarksTaskData(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 41
++	const tokenID = 4101
++	const tokenKey = "tasktoken4101"
++	const channelID = 6101
++	var upstreamMethod string
++	var upstreamPath string
++	var upstreamAuth string
++	var upstreamBody map[string]any
++
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		upstreamMethod = r.Method
++		upstreamPath = r.URL.Path
++		upstreamAuth = r.Header.Get("Authorization")
++		require.NoError(t, common.DecodeJson(r.Body, &upstreamBody))
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"task_id":"asset_req_1780830000_abcdef123456","deleted":true,"deleted_at":1780830000,"resource_id":123}}`))
++	}))
++	defer upstream.Close()
++
++	seedRedeemUser(t, userID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++	seedTaskChannel(t, channelID, upstream.URL, "seedance-token")
++	seedAssetTask(t, "task_public_delete_ok", "asset_req_1780830000_abcdef123456", userID, tokenID, channelID, model.TaskStatusSuccess, map[string]any{
++		"model":     "seedance-asset",
++		"asset_id":  "asset-123",
++		"asset_uri": "asset://asset-123",
++		"metadata": map[string]any{
++			"seedance": map[string]any{
++				"kind":        "asset",
++				"resource_id": float64(123),
++				"asset_id":    "asset-123",
++				"asset_uri":   "asset://asset-123",
++			},
++		},
++	})
++
++	w := performDeleteAssetRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, "task_public_delete_ok")
++
++	require.Equal(t, http.StatusOK, w.Code)
++	resp := decodeGenericAPIResponse(t, w.Body.Bytes())
++	require.True(t, resp.Success, "unexpected error: %s", resp.Message)
++	assert.Equal(t, http.MethodPost, upstreamMethod)
++	assert.Equal(t, "/api/task/token/asset/delete", upstreamPath)
++	assert.Equal(t, "Bearer seedance-token", upstreamAuth)
++	assert.Equal(t, "asset_req_1780830000_abcdef123456", upstreamBody["task_id"])
++
++	var payload map[string]any
++	require.NoError(t, common.Unmarshal(resp.Data, &payload))
++	assert.Equal(t, "task_public_delete_ok", payload["task_id"])
++	assert.Equal(t, true, payload["deleted"])
++	assert.Equal(t, "asset-123", payload["asset_id"])
++	assert.Equal(t, "asset://asset-123", payload["asset_uri"])
++
++	var task model.Task
++	require.NoError(t, model.DB.Where("task_id = ?", "task_public_delete_ok").First(&task).Error)
++	var taskData map[string]any
++	require.NoError(t, common.Unmarshal(task.Data, &taskData))
++	assert.Equal(t, true, taskData["deleted"])
++	metadata := taskData["metadata"].(map[string]any)["seedance"].(map[string]any)
++	assert.Equal(t, true, metadata["deleted"])
++	assert.NotZero(t, taskData["deleted_at"])
++	assert.NotZero(t, metadata["deleted_at"])
++}
++
++func TestDeleteUserTokenAsset_RejectsOtherTokenTask(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 42
++	const tokenID = 4201
++	const otherTokenID = 4202
++	const tokenKey = "tasktoken4201"
++	const channelID = 6201
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Fatalf("upstream should not be called")
++	}))
++	defer upstream.Close()
++
++	seedRedeemUser(t, userID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++	seedRedeemToken(t, otherTokenID, userID, "tasktoken4202", 1000, 0)
++	seedTaskChannel(t, channelID, upstream.URL, "seedance-token")
++	seedAssetTask(t, "asset_req_other_token", "asset_req_1780830000_other", userID, otherTokenID, channelID, model.TaskStatusSuccess, map[string]any{
++		"model": "seedance-asset",
++		"metadata": map[string]any{
++			"seedance": map[string]any{"kind": "asset", "resource_id": float64(123)},
++		},
++	})
++
++	w := performDeleteAssetRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, "asset_req_other_token")
++
++	require.Equal(t, http.StatusOK, w.Code)
++	resp := decodeGenericAPIResponse(t, w.Body.Bytes())
++	require.False(t, resp.Success)
++	assert.Contains(t, resp.Message, "task not found")
++}
++
++func TestDeleteUserTokenAsset_RejectsInvalidAssetStates(t *testing.T) {
++	tests := []struct {
++		name   string
++		status model.TaskStatus
++		data   map[string]any
++		want   string
++	}{
++		{
++			name:   "not asset",
++			status: model.TaskStatusSuccess,
++			data:   map[string]any{"model": "sora-2"},
++			want:   "task is not a seedance asset",
++		},
++		{
++			name:   "not success",
++			status: model.TaskStatusInProgress,
++			data: map[string]any{
++				"model": "seedance-asset",
++				"metadata": map[string]any{
++					"seedance": map[string]any{"kind": "asset", "resource_id": float64(123)},
++				},
++			},
++			want: "only successful asset tasks can be deleted",
++		},
++		{
++			name:   "already deleted",
++			status: model.TaskStatusSuccess,
++			data: map[string]any{
++				"model":   "seedance-asset",
++				"deleted": true,
++				"metadata": map[string]any{
++					"seedance": map[string]any{"kind": "asset", "resource_id": float64(123)},
++				},
++			},
++			want: "asset already deleted",
++		},
++	}
++
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			truncateTables(t)
++
++			const userID = 43
++			const tokenID = 4301
++			const tokenKey = "tasktoken4301"
++			const channelID = 6301
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				t.Fatalf("upstream should not be called")
++			}))
++			defer upstream.Close()
++
++			seedRedeemUser(t, userID, 0)
++			seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++			seedTaskChannel(t, channelID, upstream.URL, "seedance-token")
++			taskID := "asset_req_invalid_" + strings.ReplaceAll(tc.name, " ", "_")
++			seedAssetTask(t, taskID, "asset_req_1780830000_invalid", userID, tokenID, channelID, tc.status, tc.data)
++
++			w := performDeleteAssetRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, taskID)
++
++			require.Equal(t, http.StatusOK, w.Code)
++			resp := decodeGenericAPIResponse(t, w.Body.Bytes())
++			require.False(t, resp.Success)
++			assert.Contains(t, resp.Message, tc.want)
++		})
++	}
++}
+diff --git a/controller/user_token_redeem_test.go b/controller/user_token_redeem_test.go
+index b7441ab21..1cd0ff6d0 100644
+--- a/controller/user_token_redeem_test.go
++++ b/controller/user_token_redeem_test.go
+@@ -51,6 +51,8 @@ func TestMain(m *testing.M) {
+ func truncateTables(t *testing.T) {
+ 	t.Helper()
+ 	require.NoError(t, model.DB.Exec("DELETE FROM redemptions").Error)
++	require.NoError(t, model.DB.Exec("DELETE FROM tasks").Error)
++	require.NoError(t, model.DB.Exec("DELETE FROM channels").Error)
+ 	require.NoError(t, model.DB.Exec("DELETE FROM tokens").Error)
+ 	require.NoError(t, model.DB.Exec("DELETE FROM users").Error)
+ 	require.NoError(t, model.DB.Exec("DELETE FROM logs").Error)
+diff --git a/docs/customizations/README.md b/docs/customizations/README.md
+index c75250219..d1683f949 100644
+--- a/docs/customizations/README.md
++++ b/docs/customizations/README.md
+@@ -60,6 +60,12 @@
+ - 影响范围：Sora 视频任务计费估算、Seedance 顶层参考视频字段检测、任务 `OtherRatios`
+ - 当前状态：已实现，并已生成 `patches/007-seedance-reference-video-double-price.patch`
+ 
++### 008-seedance-asset-library-videos
++
++- 目标：复用 `/v1/videos` 异步任务链路，通过 `seedance-asset` 模型提交 Seedance 真人形象资产库任务并查询 `AssetId`
++- 影响范围：Sora/OpenAI 视频任务校验、资产任务计费倍率、公开任务 ID 响应重写、任务请求结构
++- 当前状态：已实现，并已生成 `patches/008-seedance-asset-library-videos.patch`
++
+ ## 上游同步标准流程
+ 
+ 1. 拉取并合并上游 `new-api`
+diff --git a/model/task.go b/model/task.go
+index 28547a5fe..83ebc5ff0 100644
+--- a/model/task.go
++++ b/model/task.go
+@@ -296,6 +296,21 @@ func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
+ 	return task, exist, err
+ }
+ 
++func GetByUserTokenTaskId(userId int, tokenId int, taskId string) (*Task, bool, error) {
++	if taskId == "" {
++		return nil, false, nil
++	}
++	var task *Task
++	var err error
++	err = DB.Where("user_id = ? AND token_id = ? AND task_id = ?", userId, tokenId, taskId).
++		First(&task).Error
++	exist, err := RecordExist(err)
++	if err != nil {
++		return nil, false, err
++	}
++	return task, exist, err
++}
++
+ func GetByTaskIds(userId int, taskIds []any) ([]*Task, error) {
+ 	if len(taskIds) == 0 {
+ 		return nil, nil
+diff --git a/patches/README.md b/patches/README.md
+index 9dcacbc64..dedb667eb 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -434,6 +434,57 @@ make verify-patches
+ 
+ ---
+ 
++## 008-seedance-asset-library-videos.patch
++
++**功能**：复用 `/v1/videos` 异步任务链路，通过 `seedance-asset` 模型提交 Seedance 真人形象资产库任务并查询 `AssetId`。
++
++**背景**：Seedance2 上游提供真人形象 IP 资产库 API。当前部署希望继续使用 NewAPI 的 OpenAI Videos 任务机制、API Key 鉴权、任务入库、轮询、计费和用户隔离能力，不新增下游资产专用端点。
++
++**涉及文件（6 个）**：
++
++### 1. `relay/channel/task/sora/adaptor.go`
++
++新增 `seedance-asset` 资产任务识别：
++
++- 校验只要求模型名、资源名称/资产显示名和公网图片 URL
++- 资产任务不执行参考视频时长检测
++- 资产任务 `EstimateBilling` 返回空倍率，不叠加 `seconds`、`size` 或参考视频倍率
++- `DoResponse` 基于原始 JSON 覆盖公开 `id/task_id`，避免丢失顶层 `asset_id` 和 metadata
++
++### 2. `relay/common/relay_info.go`
++
++`TaskSubmitReq` 新增 `Files []string`，用于读取 OpenAI Videos 风格 `files` 字段中的资产图片 URL。
++
++### 3. `relay/channel/task/sora/adaptor_test.go`
++
++补充资产任务回归测试：
++
++- `seedance-asset` 不返回视频计费倍率
++- 私网/回环 URL 被拒绝
++- `files[0]` 可作为资产图片输入
++- 替换公开任务 ID 时保留 `asset_id` 和 metadata
++
++### 4. `docs/customizations/008-seedance-asset-library-videos.md`
++
++记录二开背景、业务规则、风险和验证命令。
++
++### 5. `docs/customizations/README.md`
++
++登记 008 二开。
++
++### 6. `patches/README.md`
++
++登记 008 补丁。
++
++### 回归验证
++
++```bash
++go test ./relay/channel/task/sora ./relay/common ./relay ./controller
++make verify-patches
++```
++
++---
++
+ ## 补丁维护规范
+ 
+ 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
+diff --git a/relay/channel/task/sora/adaptor.go b/relay/channel/task/sora/adaptor.go
+index da4cdf0b8..b348389f6 100644
+--- a/relay/channel/task/sora/adaptor.go
++++ b/relay/channel/task/sora/adaptor.go
+@@ -2,11 +2,14 @@ package sora
+ 
+ import (
+ 	"bytes"
++	"encoding/json"
+ 	"fmt"
+ 	"io"
+ 	"mime/multipart"
++	"net"
+ 	"net/http"
+ 	"net/textproto"
++	"net/url"
+ 	"path"
+ 	"strconv"
+ 	"strings"
+@@ -39,6 +42,8 @@ type ImageURL struct {
+ 	URL string `json:"url"`
+ }
+ 
++const seedanceAssetModel = "seedance-asset"
++
+ type responseTask struct {
+ 	ID                 string `json:"id"`
+ 	TaskID             string `json:"task_id,omitempty"` //兼容旧接口
+@@ -88,10 +93,36 @@ func validateRemixRequest(c *gin.Context) *dto.TaskError {
+ 	return nil
+ }
+ 
++func validateSeedanceAssetRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
++	var req relaycommon.TaskSubmitReq
++	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
++		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
++	}
++	if strings.TrimSpace(req.Model) != seedanceAssetModel {
++		return service.TaskErrorWrapperLocal(fmt.Errorf("model field is invalid"), "invalid_request", http.StatusBadRequest)
++	}
++	if strings.TrimSpace(req.Prompt) == "" {
++		return service.TaskErrorWrapperLocal(fmt.Errorf("field prompt is required"), "invalid_request", http.StatusBadRequest)
++	}
++	imageURL := firstSeedanceAssetImageURL(req)
++	if imageURL == "" {
++		return service.TaskErrorWrapperLocal(fmt.Errorf("image url is required"), "invalid_request", http.StatusBadRequest)
++	}
++	if err := validateSeedanceAssetURL(imageURL); err != nil {
++		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
++	}
++	info.Action = constant.TaskActionGenerate
++	c.Set("task_request", req)
++	return nil
++}
++
+ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
+ 	if info.Action == constant.TaskActionRemix {
+ 		return validateRemixRequest(c)
+ 	}
++	if isSeedanceAssetRequest(c) {
++		return validateSeedanceAssetRequest(c, info)
++	}
+ 	if taskErr := relaycommon.ValidateMultipartDirect(c, info); taskErr != nil {
+ 		return taskErr
+ 	}
+@@ -112,6 +143,9 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
+ 	if err != nil {
+ 		return nil
+ 	}
++	if req.Model == seedanceAssetModel {
++		return nil
++	}
+ 
+ 	seconds, _ := strconv.Atoi(req.Seconds)
+ 	if seconds == 0 {
+@@ -157,6 +191,9 @@ func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *
+ 	if err != nil {
+ 		return nil
+ 	}
++	if req.Model == seedanceAssetModel {
++		return nil
++	}
+ 	if !shouldApplyReferenceVideoDurationBilling(info.OriginModelName, req) {
+ 		return nil
+ 	}
+@@ -178,6 +215,60 @@ func prepareReferenceVideoBilling(c *gin.Context, info *relaycommon.RelayInfo) *
+ 	return nil
+ }
+ 
++func isSeedanceAssetRequest(c *gin.Context) bool {
++	var req relaycommon.TaskSubmitReq
++	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
++		return false
++	}
++	return strings.TrimSpace(req.Model) == seedanceAssetModel
++}
++
++func firstSeedanceAssetImageURL(req relaycommon.TaskSubmitReq) string {
++	if s := strings.TrimSpace(req.InputReference); s != "" {
++		return s
++	}
++	if s := strings.TrimSpace(req.Image); s != "" {
++		return s
++	}
++	for _, image := range req.Images {
++		if s := strings.TrimSpace(image); s != "" {
++			return s
++		}
++	}
++	for _, file := range req.Files {
++		if s := strings.TrimSpace(file); s != "" {
++			return s
++		}
++	}
++	return ""
++}
++
++func validateSeedanceAssetURL(raw string) error {
++	parsed, err := url.Parse(strings.TrimSpace(raw))
++	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
++		return fmt.Errorf("image url must be a public http or https URL")
++	}
++	scheme := strings.ToLower(parsed.Scheme)
++	if scheme != "http" && scheme != "https" {
++		return fmt.Errorf("image url must be a public http or https URL")
++	}
++	host := strings.TrimSpace(parsed.Hostname())
++	if host == "" {
++		return fmt.Errorf("image url host is required")
++	}
++	lowerHost := strings.ToLower(strings.TrimSuffix(host, "."))
++	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
++		return fmt.Errorf("image url host is not allowed")
++	}
++	if strings.Contains(lowerHost, "%") {
++		return fmt.Errorf("image url host is not allowed")
++	}
++	if ip := net.ParseIP(lowerHost); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()) {
++		return fmt.Errorf("image url host is not allowed")
++	}
++	return nil
++}
++
+ func hasReferenceVideo(content []map[string]any) bool {
+ 	for _, item := range content {
+ 		if item == nil {
+@@ -381,13 +472,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
+ 		return
+ 	}
+ 
+-	// 使用公开 task_xxxx ID 返回给客户端
+-	dResp.ID = info.PublicTaskID
+-	dResp.TaskID = info.PublicTaskID
+-	c.JSON(http.StatusOK, dResp)
++	publicBody, err := publicVideoResponseBody(responseBody, info.PublicTaskID)
++	if err != nil {
++		taskErr = service.TaskErrorWrapper(err, "build_response_body_failed", http.StatusInternalServerError)
++		return
++	}
++	c.Data(http.StatusOK, "application/json", publicBody)
+ 	return upstreamID, responseBody, nil
+ }
+ 
++func publicVideoResponseBody(responseBody []byte, publicTaskID string) ([]byte, error) {
++	var raw map[string]any
++	if err := json.Unmarshal(responseBody, &raw); err != nil {
++		return nil, err
++	}
++	raw["id"] = publicTaskID
++	raw["task_id"] = publicTaskID
++	return json.Marshal(raw)
++}
++
+ // FetchTask fetch task status
+ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+ 	taskID, ok := body["task_id"].(string)
+@@ -459,5 +562,8 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
+ 	if data, err = sjson.SetBytes(data, "id", task.TaskID); err != nil {
+ 		return nil, errors.Wrap(err, "set id failed")
+ 	}
++	if data, err = sjson.SetBytes(data, "task_id", task.TaskID); err != nil {
++		return nil, errors.Wrap(err, "set task_id failed")
++	}
+ 	return data, nil
+ }
+diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
+index bd6391853..361874a9a 100644
+--- a/relay/channel/task/sora/adaptor_test.go
++++ b/relay/channel/task/sora/adaptor_test.go
+@@ -3,6 +3,7 @@ package sora
+ import (
+ 	"bytes"
+ 	"encoding/binary"
++	"encoding/json"
+ 	"fmt"
+ 	"io"
+ 	"net/http"
+@@ -13,6 +14,7 @@ import (
+ 
+ 	commonjson "github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/dto"
++	"github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/relay/common"
+ 	"github.com/QuantumNous/new-api/setting/system_setting"
+ 	"github.com/gin-gonic/gin"
+@@ -36,6 +38,119 @@ func TestEstimateBillingDefaultsToDoublePriceWhenEnvConfiguredModelHasReferenceV
+ 	}
+ }
+ 
++func TestSeedanceAssetSkipsVideoBillingRatios(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	ratios := estimateBillingForBody(t, `{
++		"model": "seedance-asset",
++		"prompt": "林春芽",
++		"seconds": "10",
++		"size": "1792x1024",
++		"files": ["https://asset.test/person.jpg"]
++	}`)
++	if len(ratios) != 0 {
++		t.Fatalf("expected no ratios for seedance asset, got %#v", ratios)
++	}
++}
++
++func TestSeedanceAssetRejectsUnsafeURLs(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, imageURL := range []string{
++		"http://127.0.0.1/person.jpg",
++		"http://[fe80::1%25eth0]/person.jpg",
++	} {
++		taskErr := validateBody(t, fmt.Sprintf(`{
++			"model": "seedance-asset",
++			"prompt": "林春芽",
++			"input_reference": %q
++		}`, imageURL))
++		if taskErr == nil {
++			t.Fatalf("expected unsafe URL %q to be rejected", imageURL)
++		}
++		if taskErr.Code != "invalid_request" {
++			t.Fatalf("code=%s message=%s", taskErr.Code, taskErr.Message)
++		}
++	}
++}
++
++func TestSeedanceAssetAcceptsFilesURL(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	taskErr := validateBody(t, `{
++		"model": "seedance-asset",
++		"prompt": "林春芽",
++		"files": ["https://asset.test/person.jpg"]
++	}`)
++	if taskErr != nil {
++		t.Fatalf("ValidateRequestAndSetAction returned error: code=%s message=%s", taskErr.Code, taskErr.Message)
++	}
++}
++
++func TestDoResponsePreservesAssetFieldsWhenReplacingPublicTaskID(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	info := &common.RelayInfo{TaskRelayInfo: &common.TaskRelayInfo{PublicTaskID: "task_public"}}
++	adaptor := &TaskAdaptor{}
++	resp := &http.Response{
++		Body: io.NopCloser(strings.NewReader(`{
++			"id":"asset_req_1780830000_abcdef123456",
++			"task_id":"asset_req_1780830000_abcdef123456",
++			"object":"video",
++			"model":"seedance-asset",
++			"status":"queued",
++			"progress":0,
++			"asset_id":"asset-123",
++			"metadata":{"seedance":{"asset_id":"asset-123","kind":"asset"}}
++		}`)),
++	}
++
++	upstreamID, taskData, taskErr := adaptor.DoResponse(c, resp, info)
++	if taskErr != nil {
++		t.Fatalf("DoResponse taskErr = %v", taskErr)
++	}
++	if upstreamID != "asset_req_1780830000_abcdef123456" {
++		t.Fatalf("upstreamID = %q", upstreamID)
++	}
++	if !strings.Contains(string(taskData), `"asset_id":"asset-123"`) {
++		t.Fatalf("taskData lost asset_id: %s", string(taskData))
++	}
++	var out map[string]any
++	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
++		t.Fatalf("response JSON error = %v body=%s", err, rec.Body.String())
++	}
++	if out["id"] != "task_public" || out["task_id"] != "task_public" || out["asset_id"] != "asset-123" {
++		t.Fatalf("unexpected response: %#v", out)
++	}
++}
++
++func TestConvertToOpenAIVideoReplacesAssetTaskIDs(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++	task := &model.Task{
++		TaskID: "task_public",
++		Data: []byte(`{
++			"id":"asset_req_1780830000_abcdef123456",
++			"task_id":"asset_req_1780830000_abcdef123456",
++			"object":"video",
++			"model":"seedance-asset",
++			"status":"completed",
++			"progress":100,
++			"asset_id":"asset-123",
++			"metadata":{"seedance":{"asset_id":"asset-123","kind":"asset"}}
++		}`),
++	}
++
++	body, err := adaptor.ConvertToOpenAIVideo(task)
++	if err != nil {
++		t.Fatalf("ConvertToOpenAIVideo error = %v", err)
++	}
++	var out map[string]any
++	if err := json.Unmarshal(body, &out); err != nil {
++		t.Fatalf("response JSON error = %v body=%s", err, string(body))
++	}
++	if out["id"] != "task_public" || out["task_id"] != "task_public" || out["asset_id"] != "asset-123" {
++		t.Fatalf("unexpected response: %#v", out)
++	}
++}
++
+ func TestEstimateBillingAddsAllReferenceVideoDurationsWhenDurationBillingEnabled(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")
+diff --git a/relay/common/relay_info.go b/relay/common/relay_info.go
+index b9d2e059a..862030b34 100644
+--- a/relay/common/relay_info.go
++++ b/relay/common/relay_info.go
+@@ -673,6 +673,7 @@ type TaskSubmitReq struct {
+ 	Mode           string                 `json:"mode,omitempty"`
+ 	Image          string                 `json:"image,omitempty"`
+ 	Images         []string               `json:"images,omitempty"`
++	Files          []string               `json:"files,omitempty"`
+ 	Content        []map[string]any       `json:"content,omitempty"`
+ 	Size           string                 `json:"size,omitempty"`
+ 	Duration       int                    `json:"duration,omitempty"`
+diff --git a/router/api-router.go b/router/api-router.go
+index 3a4b35461..215059249 100644
+--- a/router/api-router.go
++++ b/router/api-router.go
+@@ -326,6 +326,7 @@ func SetApiRouter(router *gin.Engine) {
+ 		{
+ 			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)
+ 			taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
++			taskRoute.POST("/token/asset/delete", middleware.TokenAuthReadOnly(), controller.DeleteUserTokenAsset)
+ 			taskRoute.GET("/", middleware.AdminAuth(), controller.GetAllTask)
+ 		}
+ 

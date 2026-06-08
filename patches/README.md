@@ -434,6 +434,57 @@ make verify-patches
 
 ---
 
+## 008-seedance-asset-library-videos.patch
+
+**功能**：复用 `/v1/videos` 异步任务链路，通过 `seedance-asset` 模型提交 Seedance 真人形象资产库任务并查询 `AssetId`。
+
+**背景**：Seedance2 上游提供真人形象 IP 资产库 API。当前部署希望继续使用 NewAPI 的 OpenAI Videos 任务机制、API Key 鉴权、任务入库、轮询、计费和用户隔离能力，不新增下游资产专用端点。
+
+**涉及文件（6 个）**：
+
+### 1. `relay/channel/task/sora/adaptor.go`
+
+新增 `seedance-asset` 资产任务识别：
+
+- 校验只要求模型名、资源名称/资产显示名和公网图片 URL
+- 资产任务不执行参考视频时长检测
+- 资产任务 `EstimateBilling` 返回空倍率，不叠加 `seconds`、`size` 或参考视频倍率
+- `DoResponse` 基于原始 JSON 覆盖公开 `id/task_id`，避免丢失顶层 `asset_id` 和 metadata
+
+### 2. `relay/common/relay_info.go`
+
+`TaskSubmitReq` 新增 `Files []string`，用于读取 OpenAI Videos 风格 `files` 字段中的资产图片 URL。
+
+### 3. `relay/channel/task/sora/adaptor_test.go`
+
+补充资产任务回归测试：
+
+- `seedance-asset` 不返回视频计费倍率
+- 私网/回环 URL 被拒绝
+- `files[0]` 可作为资产图片输入
+- 替换公开任务 ID 时保留 `asset_id` 和 metadata
+
+### 4. `docs/customizations/008-seedance-asset-library-videos.md`
+
+记录二开背景、业务规则、风险和验证命令。
+
+### 5. `docs/customizations/README.md`
+
+登记 008 二开。
+
+### 6. `patches/README.md`
+
+登记 008 补丁。
+
+### 回归验证
+
+```bash
+go test ./relay/channel/task/sora ./relay/common ./relay ./controller
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
