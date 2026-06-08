@@ -2,7 +2,6 @@ package sora
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -483,12 +482,12 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 func publicVideoResponseBody(responseBody []byte, publicTaskID string) ([]byte, error) {
 	var raw map[string]any
-	if err := json.Unmarshal(responseBody, &raw); err != nil {
+	if err := common.Unmarshal(responseBody, &raw); err != nil {
 		return nil, err
 	}
 	raw["id"] = publicTaskID
 	raw["task_id"] = publicTaskID
-	return json.Marshal(raw)
+	return common.Marshal(raw)
 }
 
 // FetchTask fetch task status

@@ -118,6 +118,11 @@ type seedanceAssetTaskData struct {
 	} `json:"metadata,omitempty"`
 }
 
+type upstreamDeleteAssetResponse struct {
+	Success *bool  `json:"success,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 func DeleteUserTokenAsset(c *gin.Context) {
 	var req deleteUserTokenAssetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -235,6 +240,21 @@ func deleteUpstreamSeedanceAsset(task *model.Task) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("seedance asset delete failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read seedance asset delete response failed: %w", err)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var upstreamResp upstreamDeleteAssetResponse
+	if err := common.Unmarshal(body, &upstreamResp); err == nil && upstreamResp.Success != nil && !*upstreamResp.Success {
+		message := strings.TrimSpace(upstreamResp.Message)
+		if message == "" {
+			message = strings.TrimSpace(string(body))
+		}
+		return fmt.Errorf("seedance asset delete failed: %s", message)
 	}
 	return nil
 }

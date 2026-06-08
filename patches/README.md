@@ -440,7 +440,7 @@ make verify-patches
 
 **背景**：Seedance2 上游提供真人形象 IP 资产库 API。当前部署希望继续使用 NewAPI 的 OpenAI Videos 任务机制、API Key 鉴权、任务入库、轮询、计费和用户隔离能力，不新增下游资产专用端点。
 
-**涉及文件（6 个）**：
+**涉及文件（11 个）**：
 
 ### 1. `relay/channel/task/sora/adaptor.go`
 
@@ -464,15 +464,47 @@ make verify-patches
 - `files[0]` 可作为资产图片输入
 - 替换公开任务 ID 时保留 `asset_id` 和 metadata
 
-### 4. `docs/customizations/008-seedance-asset-library-videos.md`
+### 4. `controller/task.go`
+
+新增 API Key 维度资产删除接口：
+
+- 按当前 `user_id + token_id + task_id` 查找任务
+- 校验任务为已成功且未删除的 `seedance-asset` 资产任务
+- 把任务记录里的上游任务 ID 转发到渠道 `POST /api/task/token/asset/delete`
+- 上游 NewAPI wrapper 返回 `success=false` 时视为失败，不标记本地任务已删除
+- 删除成功后只在 task data 与 `metadata.seedance` 标记 `deleted/deleted_at`
+
+### 5. `model/task.go`
+
+新增 `GetByUserTokenTaskId`，按当前用户、当前 API Key 和任务 ID 查询单个任务。
+
+### 6. `router/api-router.go`
+
+新增 `POST /api/task/token/asset/delete`，使用 API Key 任务自助链路。
+
+### 7. `controller/task_token_test.go`
+
+补充资产删除 controller 回归测试：
+
+- 当前 API Key 创建的成功资产可以删除
+- 删除调用统一转发到上游 `POST /api/task/token/asset/delete`
+- 上游 HTTP 200 但 `success=false` 时不会标记本地任务已删除
+- 同用户其他 API Key 的资产不能删除
+- 非资产、未成功、已删除的任务会拒绝
+
+### 8. `controller/user_token_redeem_test.go`
+
+测试清理逻辑同步清空任务和渠道表，避免 controller 测试之间污染全局测试数据库。
+
+### 9. `docs/customizations/008-seedance-asset-library-videos.md`
 
 记录二开背景、业务规则、风险和验证命令。
 
-### 5. `docs/customizations/README.md`
+### 10. `docs/customizations/README.md`
 
 登记 008 二开。
 
-### 6. `patches/README.md`
+### 11. `patches/README.md`
 
 登记 008 补丁。
 

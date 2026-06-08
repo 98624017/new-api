@@ -293,6 +293,51 @@ func TestDeleteUserTokenAsset_DeletesCurrentTokenAssetAndMarksTaskData(t *testin
 	assert.NotZero(t, metadata["deleted_at"])
 }
 
+func TestDeleteUserTokenAsset_DoesNotMarkDeletedWhenUpstreamBusinessFails(t *testing.T) {
+	truncateTables(t)
+
+	const userID = 44
+	const tokenID = 4401
+	const tokenKey = "tasktoken4401"
+	const channelID = 6401
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":false,"message":"upstream asset delete rejected"}`))
+	}))
+	defer upstream.Close()
+
+	seedRedeemUser(t, userID, 0)
+	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
+	seedTaskChannel(t, channelID, upstream.URL, "seedance-token")
+	seedAssetTask(t, "task_public_delete_upstream_fail", "asset_req_1780830000_failed", userID, tokenID, channelID, model.TaskStatusSuccess, map[string]any{
+		"model":     "seedance-asset",
+		"asset_id":  "asset-456",
+		"asset_uri": "asset://asset-456",
+		"metadata": map[string]any{
+			"seedance": map[string]any{
+				"kind":        "asset",
+				"resource_id": float64(456),
+			},
+		},
+	})
+
+	w := performDeleteAssetRequest(t, makeTokenTaskRouter(), "Bearer sk-"+tokenKey, "task_public_delete_upstream_fail")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	resp := decodeGenericAPIResponse(t, w.Body.Bytes())
+	require.False(t, resp.Success)
+	assert.Contains(t, resp.Message, "upstream asset delete rejected")
+
+	var task model.Task
+	require.NoError(t, model.DB.Where("task_id = ?", "task_public_delete_upstream_fail").First(&task).Error)
+	var taskData map[string]any
+	require.NoError(t, common.Unmarshal(task.Data, &taskData))
+	assert.NotEqual(t, true, taskData["deleted"])
+	metadata := taskData["metadata"].(map[string]any)["seedance"].(map[string]any)
+	assert.NotEqual(t, true, metadata["deleted"])
+}
+
 func TestDeleteUserTokenAsset_RejectsOtherTokenTask(t *testing.T) {
 	truncateTables(t)
 

@@ -49,6 +49,7 @@
 - 删除资产时下游只传当前 NewAPI 返回的 `task_id`，不传上游 `resource_id`
 - NewAPI 校验当前 API Key 对该任务的归属后，把任务记录里的上游任务 ID 转发到渠道 `base_url` 的 `POST /api/task/token/asset/delete`
 - 当渠道上游仍是 NewAPI 时，上游 NewAPI 会继续按自己的任务记录转发；当渠道上游是 Go 代理时，Go 代理直接按 `asset_req_...` 查询并删除真实资产资源
+- 当上游返回 NewAPI wrapper 且 `success=false` 时，本地必须视为删除失败，不得标记任务已删除；只有 HTTP 2xx 且未明确业务失败时才继续本地删除标记
 - 删除成功后不删除任务历史、不退款、不改任务状态，只在 task data 和 `metadata.seedance` 标记 `deleted=true`、`deleted_at`
 
 API Key 任务列表示例：
@@ -140,6 +141,7 @@ Content-Type: application/json
 - 校验任务为已成功、未删除的 `seedance-asset` 资产任务
 - 从任务 `PrivateData.UpstreamTaskID` 读取上游任务 ID；旧数据无该字段时回退 `TaskID`
 - 调原渠道 `POST /api/task/token/asset/delete`，请求体 `{"task_id":"<upstream_task_id>"}`
+- 检查上游 NewAPI wrapper 响应，遇到 `success=false` 时返回错误并跳过本地删除标记
 - 删除成功后保留任务历史，只标记 `deleted` 和 `deleted_at`
 
 ### 5. `model/task.go`
@@ -156,6 +158,7 @@ Content-Type: application/json
 - 补充资产删除回归测试：
   - 当前 API Key 创建的成功资产可以删除
   - 删除调用统一转发到上游 `POST /api/task/token/asset/delete`
+  - 上游 HTTP 200 但 `success=false` 时不会标记本地任务已删除
   - 同用户其他 API Key 的资产不能删除
   - 非资产、未成功、已删除的任务会拒绝
 
