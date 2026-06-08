@@ -72,6 +72,7 @@ go test ./relay/common -count=1
 ## 6. 升级关注点
 
 - 上游若重构 Docker workflow，需要手动复核本地 GHCR workflow 是否仍需要保留。
+- Docker workflow 中固定 SHA 的第三方 Action 需要定期复核；`cosign-installer` 应保持在支持当前 GitHub runner 和 cosign release 下载重试的版本，避免单架构签名安装失败导致多架构 manifest 不更新。
 - 上游同步 workflow 若调整分支创建方式，需要确认同步分支仍基于 upstream 干净分支，而不是当前已打补丁分支。
 - 上游若重构 relay request body 读取逻辑，需要重新确认 multipart 回归测试仍覆盖真实风险。
 - 上游同步基准更新时，应同步更新 `scripts/verify_patches.sh` 的默认 `PATCH_BASE_REF_DEFAULT`。
