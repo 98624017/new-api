@@ -414,10 +414,10 @@ index 000000000..41f4067f4
 +          echo "" >> $GITHUB_STEP_SUMMARY
 +          echo "To actually sync, re-run this workflow with **dry_run = false**." >> $GITHUB_STEP_SUMMARY
 diff --git a/.gitignore b/.gitignore
-index c17652a21..c10df36a8 100644
+index c17652a21..2e60c0942 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -29,5 +29,6 @@ data/
+@@ -29,5 +29,10 @@ data/
  .gomodcache/
  .gocache-temp
  .gopath
@@ -426,6 +426,10 @@ index c17652a21..c10df36a8 100644
 -token_estimator_test.go
 \ No newline at end of file
 +token_estimator_test.go
++
++# local generated verification/artifact outputs
++.tmp-newapi-verify
++meituapi/
 diff --git a/AGENTS.md b/AGENTS.md
 index cd1756d55..65ddc8da3 100644
 --- a/AGENTS.md

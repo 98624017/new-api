@@ -28,7 +28,7 @@
   - 保留上游同步 workflow。
   - workflow 运行时先把当前分支的 `patches/*.patch` 复制到临时目录，再从 `upstream/<branch>` 创建同步分支并应用临时目录中的补丁，避免在已打补丁分支上重复应用补丁。
 - `.gitignore`
-  - 保留本地生成物忽略规则。
+  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify` 和 `meituapi/` 等本地验证/素材产物。
 - `AGENTS.md`
   - 保留项目内 agent 工作约定。
 - `README.md` / `README.zh_CN.md`

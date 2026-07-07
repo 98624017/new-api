@@ -300,7 +300,7 @@ go test ./relay/common
 
 ### 3. `.gitignore`
 
-保留本地生成物忽略规则。
+保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify` 和 `meituapi/` 等本地验证/素材产物。
 
 ### 4. `AGENTS.md`
 
