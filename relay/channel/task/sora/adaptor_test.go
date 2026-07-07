@@ -151,6 +151,249 @@ func TestConvertToOpenAIVideoReplacesAssetTaskIDs(t *testing.T) {
 	}
 }
 
+func TestConvertToOpenAIVideoNormalizesStoredSuccessWithResultURL(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+	task := &model.Task{
+		TaskID:     "task_public",
+		Status:     model.TaskStatusSuccess,
+		Progress:   "100%",
+		FinishTime: 1780839999,
+		PrivateData: model.TaskPrivateData{
+			ResultURL: "https://cdn.example.com/result.mp4",
+		},
+		Data: []byte(`{
+			"id":"video_upstream",
+			"task_id":"video_upstream",
+			"object":"video",
+			"model":"seedance",
+			"status":"unknown",
+			"progress":100,
+			"video_url":"https://cdn.example.com/result.mp4"
+		}`),
+	}
+
+	body, err := adaptor.ConvertToOpenAIVideo(task)
+	if err != nil {
+		t.Fatalf("ConvertToOpenAIVideo error = %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response JSON error = %v body=%s", err, string(body))
+	}
+	if out["id"] != "task_public" || out["task_id"] != "task_public" {
+		t.Fatalf("unexpected task ids: %#v", out)
+	}
+	if out["status"] != dto.VideoStatusCompleted {
+		t.Fatalf("expected completed status, got %#v", out["status"])
+	}
+	if out["progress"] != float64(100) {
+		t.Fatalf("expected 100 progress, got %#v", out["progress"])
+	}
+	if out["completed_at"] != float64(1780839999) {
+		t.Fatalf("expected completed_at to follow task finish time, got %#v", out["completed_at"])
+	}
+	metadata, ok := out["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata object, got %#v", out["metadata"])
+	}
+	if metadata["url"] != "https://cdn.example.com/result.mp4" {
+		t.Fatalf("expected result url in metadata, got %#v", metadata)
+	}
+	if _, ok := out["error"]; ok {
+		t.Fatalf("expected success response not to expose error, got %#v", out["error"])
+	}
+}
+
+func TestParseTaskResultTreatsUnknownOpenAIVideoStatusAsInProgress(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+		"id": "video_123",
+		"object": "video",
+		"model": "seedance",
+		"status": "unknown",
+		"progress": 0
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != model.TaskStatusInProgress {
+		t.Fatalf("expected unknown video status to stay in progress, got %s", taskInfo.Status)
+	}
+}
+
+func TestParseTaskResultTreatsMissingVideoStatusAsInProgress(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+		"id": "video_123",
+		"object": "video",
+		"model": "seedance"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != model.TaskStatusInProgress {
+		t.Fatalf("expected missing video status to stay in progress, got %s", taskInfo.Status)
+	}
+}
+
+func TestParseTaskResultTreatsUnknownStatusWithResultURLAsSuccess(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	tests := []struct {
+		name string
+		body string
+		url  string
+	}{
+		{
+			name: "top-level video_url",
+			body: `{
+				"id": "video_123",
+				"object": "video",
+				"model": "seedance",
+				"status": "unknown",
+				"video_url": "https://cdn.example.com/result.mp4"
+			}`,
+			url: "https://cdn.example.com/result.mp4",
+		},
+		{
+			name: "missing status top-level url",
+			body: `{
+				"url": "https://cdn.example.com/url-only-result.mp4"
+			}`,
+			url: "https://cdn.example.com/url-only-result.mp4",
+		},
+		{
+			name: "metadata url",
+			body: `{
+				"id": "video_123",
+				"object": "video",
+				"model": "seedance",
+				"status": "unknown",
+				"metadata": {
+					"url": "https://cdn.example.com/metadata-result.mp4"
+				}
+			}`,
+			url: "https://cdn.example.com/metadata-result.mp4",
+		},
+		{
+			name: "output video_url object",
+			body: `{
+				"id": "video_123",
+				"object": "video",
+				"model": "seedance",
+				"status": "unknown",
+				"output": {
+					"video_url": {
+						"url": "https://cdn.example.com/output-result.mp4"
+					}
+				}
+			}`,
+			url: "https://cdn.example.com/output-result.mp4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskInfo, err := adaptor.ParseTaskResult([]byte(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if taskInfo.Status != model.TaskStatusSuccess {
+				t.Fatalf("expected unknown status with result url to succeed, got %s", taskInfo.Status)
+			}
+			if taskInfo.Url != tt.url {
+				t.Fatalf("expected result url %q, got %q", tt.url, taskInfo.Url)
+			}
+		})
+	}
+}
+
+func TestParseTaskResultDoesNotCompleteUnknownStatusFromProgressOnly(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+		"id": "video_123",
+		"object": "video",
+		"model": "seedance",
+		"status": "unknown",
+		"progress": 100
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != model.TaskStatusInProgress {
+		t.Fatalf("expected progress-only unknown status to stay in progress, got %s", taskInfo.Status)
+	}
+	if taskInfo.Progress == "100%" {
+		t.Fatalf("expected progress-only unknown status not to report complete progress")
+	}
+}
+
+func TestParseTaskResultTreatsMissingStatusVideoErrorAsFailure(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+		"id": "video_123",
+		"object": "video",
+		"model": "seedance",
+		"error": {
+			"message": "upstream rejected video task",
+			"code": "invalid_request"
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != model.TaskStatusFailure {
+		t.Fatalf("expected missing status video error to fail, got %s", taskInfo.Status)
+	}
+	if taskInfo.Reason != "upstream rejected video task" {
+		t.Fatalf("expected upstream error reason, got %q", taskInfo.Reason)
+	}
+}
+
+func TestParseTaskResultKeepsErrorPriorityOverResultURL(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
+		"id": "video_123",
+		"object": "video",
+		"model": "seedance",
+		"status": "unknown",
+		"video_url": "https://cdn.example.com/result.mp4",
+		"error": {
+			"message": "upstream failed after rendering",
+			"code": "render_failed"
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != model.TaskStatusFailure {
+		t.Fatalf("expected explicit error to win over result url, got %s", taskInfo.Status)
+	}
+	if taskInfo.Url != "" {
+		t.Fatalf("expected failed task not to expose result url, got %q", taskInfo.Url)
+	}
+	if taskInfo.Reason != "upstream failed after rendering" {
+		t.Fatalf("expected upstream error reason, got %q", taskInfo.Reason)
+	}
+}
+
+func TestParseTaskResultKeepsEmptyStatusForUnrecognizedPayload(t *testing.T) {
+	adaptor := &TaskAdaptor{}
+
+	taskInfo, err := adaptor.ParseTaskResult([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskInfo.Status != "" {
+		t.Fatalf("expected unrecognized payload to keep empty status, got %s", taskInfo.Status)
+	}
+}
+
 func TestEstimateBillingAddsAllReferenceVideoDurationsWhenDurationBillingEnabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")

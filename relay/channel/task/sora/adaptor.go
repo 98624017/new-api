@@ -56,6 +56,16 @@ type responseTask struct {
 	Seconds            string `json:"seconds,omitempty"`
 	Size               string `json:"size,omitempty"`
 	RemixedFromVideoID string `json:"remixed_from_video_id,omitempty"`
+	URL                any    `json:"url,omitempty"`
+	VideoURL           any    `json:"video_url,omitempty"`
+	Metadata           any    `json:"metadata,omitempty"`
+	Content            any    `json:"content,omitempty"`
+	Output             any    `json:"output,omitempty"`
+	Data               any    `json:"data,omitempty"`
+	Result             any    `json:"result,omitempty"`
+	TaskResult         any    `json:"task_result,omitempty"`
+	Videos             any    `json:"videos,omitempty"`
+	Creations          any    `json:"creations,omitempty"`
 	Error              *struct {
 		Message string `json:"message"`
 		Code    string `json:"code"`
@@ -531,15 +541,26 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		Code: 0,
 	}
 
-	switch resTask.Status {
-	case "queued", "pending":
+	resultURL := videoResultURL(resTask)
+	normalizedStatus := normalizeTaskStatus(resTask)
+	if normalizedStatus == "" && resultURL != "" {
+		normalizedStatus = "unknown"
+	}
+	switch normalizedStatus {
+	case "queued", "pending", "submitted", "not_start":
 		taskResult.Status = model.TaskStatusQueued
-	case "processing", "in_progress":
-		taskResult.Status = model.TaskStatusInProgress
-	case "completed":
+	case "processing", "in_progress", "running", "unknown":
+		if normalizedStatus == "unknown" && resultURL != "" {
+			taskResult.Status = model.TaskStatusSuccess
+			taskResult.Url = resultURL
+		} else {
+			taskResult.Status = model.TaskStatusInProgress
+		}
+	case "completed", "succeeded":
 		taskResult.Status = model.TaskStatusSuccess
-		// Url intentionally left empty — the caller constructs the proxy URL using the public task ID
-	case "failed", "cancelled":
+		// 兼容聚合上游直接返回结果 URL；官方 Sora 响应通常为空，调用方会构造本地代理 URL。
+		taskResult.Url = resultURL
+	case "failed", "cancelled", "canceled":
 		taskResult.Status = model.TaskStatusFailure
 		if resTask.Error != nil {
 			taskResult.Reason = resTask.Error.Message
@@ -555,6 +576,83 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	return &taskResult, nil
 }
 
+func normalizeTaskStatus(resTask responseTask) string {
+	status := strings.ToLower(strings.TrimSpace(resTask.Status))
+	if isOpenAIVideoTaskError(resTask) && (status == "" || status == "unknown") {
+		return "failed"
+	}
+	if status != "" {
+		return status
+	}
+	if isOpenAIVideoTaskResponse(resTask) {
+		return "unknown"
+	}
+	return ""
+}
+
+func isOpenAIVideoTaskResponse(resTask responseTask) bool {
+	return resTask.ID != "" || resTask.TaskID != "" || resTask.Object == "video" || resTask.Model != ""
+}
+
+func isOpenAIVideoTaskError(resTask responseTask) bool {
+	return resTask.Error != nil && (strings.TrimSpace(resTask.Error.Message) != "" || strings.TrimSpace(resTask.Error.Code) != "")
+}
+
+func videoResultURL(resTask responseTask) string {
+	for _, value := range []any{
+		resTask.URL,
+		resTask.VideoURL,
+		urlFromObjectPath(resTask.Metadata, "url"),
+		urlFromObjectPath(resTask.Metadata, "video_url"),
+		urlFromObjectPath(resTask.Content, "url"),
+		urlFromObjectPath(resTask.Content, "video_url"),
+		urlFromObjectPath(resTask.Output, "url"),
+		urlFromObjectPath(resTask.Output, "video_url"),
+		urlFromObjectPath(resTask.Data, "url"),
+		urlFromObjectPath(resTask.Data, "video_url"),
+		urlFromObjectPath(resTask.Result, "url"),
+		urlFromObjectPath(resTask.Result, "video_url"),
+		urlFromObjectPath(resTask.TaskResult, "url"),
+		urlFromObjectPath(resTask.TaskResult, "video_url"),
+		urlFromObjectPath(resTask.TaskResult, "videos"),
+		resTask.Videos,
+		resTask.Creations,
+	} {
+		if url := urlFromValue(value); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+func urlFromObjectPath(value any, key string) any {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return obj[key]
+}
+
+func urlFromValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		for _, key := range []string{"url", "video_url", "download_url"} {
+			if url := urlFromValue(v[key]); url != "" {
+				return url
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if url := urlFromValue(item); url != "" {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
 func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	data := task.Data
 	var err error
@@ -564,5 +662,57 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	if data, err = sjson.SetBytes(data, "task_id", task.TaskID); err != nil {
 		return nil, errors.Wrap(err, "set task_id failed")
 	}
+	if data, err = normalizeStoredOpenAIVideoTask(data, task); err != nil {
+		return nil, err
+	}
 	return data, nil
+}
+
+func normalizeStoredOpenAIVideoTask(data []byte, task *model.Task) ([]byte, error) {
+	var err error
+	if task.Status != "" {
+		if data, err = sjson.SetBytes(data, "status", task.Status.ToVideoStatus()); err != nil {
+			return nil, errors.Wrap(err, "set status failed")
+		}
+	}
+	if progress := taskProgressValue(task); progress >= 0 {
+		if data, err = sjson.SetBytes(data, "progress", progress); err != nil {
+			return nil, errors.Wrap(err, "set progress failed")
+		}
+	}
+	if task.Status == model.TaskStatusSuccess {
+		if task.FinishTime != 0 {
+			if data, err = sjson.SetBytes(data, "completed_at", task.FinishTime); err != nil {
+				return nil, errors.Wrap(err, "set completed_at failed")
+			}
+		} else if task.UpdatedAt != 0 {
+			if data, err = sjson.SetBytes(data, "completed_at", task.UpdatedAt); err != nil {
+				return nil, errors.Wrap(err, "set completed_at failed")
+			}
+		}
+		if resultURL := strings.TrimSpace(task.GetResultURL()); resultURL != "" {
+			if data, err = sjson.SetBytes(data, "metadata.url", resultURL); err != nil {
+				return nil, errors.Wrap(err, "set result url failed")
+			}
+		}
+		if data, err = sjson.DeleteBytes(data, "error"); err != nil {
+			return nil, errors.Wrap(err, "delete success error failed")
+		}
+	}
+	return data, nil
+}
+
+func taskProgressValue(task *model.Task) int {
+	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
+		return 100
+	}
+	progress := strings.TrimSuffix(strings.TrimSpace(task.Progress), "%")
+	if progress == "" {
+		return -1
+	}
+	value, err := strconv.Atoi(progress)
+	if err != nil {
+		return -1
+	}
+	return value
 }

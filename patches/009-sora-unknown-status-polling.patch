@@ -1,0 +1,573 @@
+diff --git a/controller/video_proxy.go b/controller/video_proxy.go
+index 520d313a3..d4d9fb924 100644
+--- a/controller/video_proxy.go
++++ b/controller/video_proxy.go
+@@ -107,8 +107,12 @@ func VideoProxy(c *gin.Context) {
+ 			return
+ 		}
+ 	case constant.ChannelTypeOpenAI, constant.ChannelTypeSora:
+-		videoURL = fmt.Sprintf("%s/v1/videos/%s/content", baseURL, task.GetUpstreamTaskID())
+-		req.Header.Set("Authorization", "Bearer "+channel.Key)
++		if resultURL := strings.TrimSpace(task.GetResultURL()); resultURL != "" && !isTaskProxyContentURL(resultURL, task.TaskID) {
++			videoURL = resultURL
++		} else {
++			videoURL = fmt.Sprintf("%s/v1/videos/%s/content", baseURL, task.GetUpstreamTaskID())
++			req.Header.Set("Authorization", "Bearer "+channel.Key)
++		}
+ 	default:
+ 		// Video URL is stored in PrivateData.ResultURL (fallback to FailReason for old data)
+ 		videoURL = task.GetResultURL()
+diff --git a/controller/video_proxy_test.go b/controller/video_proxy_test.go
+new file mode 100644
+index 000000000..54fc55f5f
+--- /dev/null
++++ b/controller/video_proxy_test.go
+@@ -0,0 +1,97 @@
++package controller_test
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/controller"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/setting/system_setting"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestVideoProxyUsesStoredResultURLForSoraTask(t *testing.T) {
++	truncateTables(t)
++	allowControllerLocalVideoServers(t)
++	service.InitHttpClient()
++
++	const userID = 9101
++	const channelID = 9102
++
++	var resultHit bool
++	resultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		resultHit = true
++		w.Header().Set("Content-Type", "video/mp4")
++		_, _ = w.Write([]byte("video-bytes"))
++	}))
++	defer resultServer.Close()
++
++	var upstreamHit bool
++	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		upstreamHit = true
++		w.WriteHeader(http.StatusInternalServerError)
++	}))
++	defer upstreamServer.Close()
++
++	channel := &model.Channel{
++		Id:     channelID,
++		Type:   constant.ChannelTypeSora,
++		Key:    "sora-key",
++		Status: common.ChannelStatusEnabled,
++		Name:   "sora result url test",
++	}
++	channel.BaseURL = &upstreamServer.URL
++	require.NoError(t, model.DB.Create(channel).Error)
++
++	task := &model.Task{
++		TaskID:    "task_sora_result_url",
++		UserId:    userID,
++		ChannelId: channelID,
++		Platform:  constant.TaskPlatform("openai"),
++		Action:    "generate",
++		Status:    model.TaskStatusSuccess,
++		Progress:  "100%",
++		PrivateData: model.TaskPrivateData{
++			UpstreamTaskID: "video_upstream",
++			ResultURL:      resultServer.URL + "/result.mp4",
++		},
++	}
++	task.SetData(map[string]any{
++		"id":       "video_upstream",
++		"object":   "video",
++		"model":    "seedance",
++		"status":   "unknown",
++		"progress": 100,
++	})
++	require.NoError(t, model.DB.Create(task).Error)
++
++	router := gin.New()
++	router.GET("/v1/videos/:task_id/content", func(c *gin.Context) {
++		c.Set("id", userID)
++		controller.VideoProxy(c)
++	})
++
++	req := httptest.NewRequest(http.MethodGet, "/v1/videos/task_sora_result_url/content", nil)
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, req)
++
++	require.Equal(t, http.StatusOK, w.Code)
++	require.Equal(t, "video-bytes", w.Body.String())
++	require.True(t, resultHit, "expected stored result url to be fetched")
++	require.False(t, upstreamHit, "expected upstream /content not to be fetched when result url is stored")
++}
++
++func allowControllerLocalVideoServers(t *testing.T) {
++	t.Helper()
++	fetchSetting := system_setting.GetFetchSetting()
++	original := *fetchSetting
++	fetchSetting.EnableSSRFProtection = false
++	t.Cleanup(func() {
++		*fetchSetting = original
++	})
++}
+diff --git a/relay/channel/task/sora/adaptor.go b/relay/channel/task/sora/adaptor.go
+index 22ad1b023..0a674c8f9 100644
+--- a/relay/channel/task/sora/adaptor.go
++++ b/relay/channel/task/sora/adaptor.go
+@@ -56,6 +56,16 @@ type responseTask struct {
+ 	Seconds            string `json:"seconds,omitempty"`
+ 	Size               string `json:"size,omitempty"`
+ 	RemixedFromVideoID string `json:"remixed_from_video_id,omitempty"`
++	URL                any    `json:"url,omitempty"`
++	VideoURL           any    `json:"video_url,omitempty"`
++	Metadata           any    `json:"metadata,omitempty"`
++	Content            any    `json:"content,omitempty"`
++	Output             any    `json:"output,omitempty"`
++	Data               any    `json:"data,omitempty"`
++	Result             any    `json:"result,omitempty"`
++	TaskResult         any    `json:"task_result,omitempty"`
++	Videos             any    `json:"videos,omitempty"`
++	Creations          any    `json:"creations,omitempty"`
+ 	Error              *struct {
+ 		Message string `json:"message"`
+ 		Code    string `json:"code"`
+@@ -531,15 +541,26 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
+ 		Code: 0,
+ 	}
+ 
+-	switch resTask.Status {
+-	case "queued", "pending":
++	resultURL := videoResultURL(resTask)
++	normalizedStatus := normalizeTaskStatus(resTask)
++	if normalizedStatus == "" && resultURL != "" {
++		normalizedStatus = "unknown"
++	}
++	switch normalizedStatus {
++	case "queued", "pending", "submitted", "not_start":
+ 		taskResult.Status = model.TaskStatusQueued
+-	case "processing", "in_progress":
+-		taskResult.Status = model.TaskStatusInProgress
+-	case "completed":
++	case "processing", "in_progress", "running", "unknown":
++		if normalizedStatus == "unknown" && resultURL != "" {
++			taskResult.Status = model.TaskStatusSuccess
++			taskResult.Url = resultURL
++		} else {
++			taskResult.Status = model.TaskStatusInProgress
++		}
++	case "completed", "succeeded":
+ 		taskResult.Status = model.TaskStatusSuccess
+-		// Url intentionally left empty — the caller constructs the proxy URL using the public task ID
+-	case "failed", "cancelled":
++		// 兼容聚合上游直接返回结果 URL；官方 Sora 响应通常为空，调用方会构造本地代理 URL。
++		taskResult.Url = resultURL
++	case "failed", "cancelled", "canceled":
+ 		taskResult.Status = model.TaskStatusFailure
+ 		if resTask.Error != nil {
+ 			taskResult.Reason = resTask.Error.Message
+@@ -555,6 +576,83 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
+ 	return &taskResult, nil
+ }
+ 
++func normalizeTaskStatus(resTask responseTask) string {
++	status := strings.ToLower(strings.TrimSpace(resTask.Status))
++	if isOpenAIVideoTaskError(resTask) && (status == "" || status == "unknown") {
++		return "failed"
++	}
++	if status != "" {
++		return status
++	}
++	if isOpenAIVideoTaskResponse(resTask) {
++		return "unknown"
++	}
++	return ""
++}
++
++func isOpenAIVideoTaskResponse(resTask responseTask) bool {
++	return resTask.ID != "" || resTask.TaskID != "" || resTask.Object == "video" || resTask.Model != ""
++}
++
++func isOpenAIVideoTaskError(resTask responseTask) bool {
++	return resTask.Error != nil && (strings.TrimSpace(resTask.Error.Message) != "" || strings.TrimSpace(resTask.Error.Code) != "")
++}
++
++func videoResultURL(resTask responseTask) string {
++	for _, value := range []any{
++		resTask.URL,
++		resTask.VideoURL,
++		urlFromObjectPath(resTask.Metadata, "url"),
++		urlFromObjectPath(resTask.Metadata, "video_url"),
++		urlFromObjectPath(resTask.Content, "url"),
++		urlFromObjectPath(resTask.Content, "video_url"),
++		urlFromObjectPath(resTask.Output, "url"),
++		urlFromObjectPath(resTask.Output, "video_url"),
++		urlFromObjectPath(resTask.Data, "url"),
++		urlFromObjectPath(resTask.Data, "video_url"),
++		urlFromObjectPath(resTask.Result, "url"),
++		urlFromObjectPath(resTask.Result, "video_url"),
++		urlFromObjectPath(resTask.TaskResult, "url"),
++		urlFromObjectPath(resTask.TaskResult, "video_url"),
++		urlFromObjectPath(resTask.TaskResult, "videos"),
++		resTask.Videos,
++		resTask.Creations,
++	} {
++		if url := urlFromValue(value); url != "" {
++			return url
++		}
++	}
++	return ""
++}
++
++func urlFromObjectPath(value any, key string) any {
++	obj, ok := value.(map[string]any)
++	if !ok {
++		return nil
++	}
++	return obj[key]
++}
++
++func urlFromValue(value any) string {
++	switch v := value.(type) {
++	case string:
++		return strings.TrimSpace(v)
++	case map[string]any:
++		for _, key := range []string{"url", "video_url", "download_url"} {
++			if url := urlFromValue(v[key]); url != "" {
++				return url
++			}
++		}
++	case []any:
++		for _, item := range v {
++			if url := urlFromValue(item); url != "" {
++				return url
++			}
++		}
++	}
++	return ""
++}
++
+ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
+ 	data := task.Data
+ 	var err error
+@@ -564,5 +662,57 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
+ 	if data, err = sjson.SetBytes(data, "task_id", task.TaskID); err != nil {
+ 		return nil, errors.Wrap(err, "set task_id failed")
+ 	}
++	if data, err = normalizeStoredOpenAIVideoTask(data, task); err != nil {
++		return nil, err
++	}
++	return data, nil
++}
++
++func normalizeStoredOpenAIVideoTask(data []byte, task *model.Task) ([]byte, error) {
++	var err error
++	if task.Status != "" {
++		if data, err = sjson.SetBytes(data, "status", task.Status.ToVideoStatus()); err != nil {
++			return nil, errors.Wrap(err, "set status failed")
++		}
++	}
++	if progress := taskProgressValue(task); progress >= 0 {
++		if data, err = sjson.SetBytes(data, "progress", progress); err != nil {
++			return nil, errors.Wrap(err, "set progress failed")
++		}
++	}
++	if task.Status == model.TaskStatusSuccess {
++		if task.FinishTime != 0 {
++			if data, err = sjson.SetBytes(data, "completed_at", task.FinishTime); err != nil {
++				return nil, errors.Wrap(err, "set completed_at failed")
++			}
++		} else if task.UpdatedAt != 0 {
++			if data, err = sjson.SetBytes(data, "completed_at", task.UpdatedAt); err != nil {
++				return nil, errors.Wrap(err, "set completed_at failed")
++			}
++		}
++		if resultURL := strings.TrimSpace(task.GetResultURL()); resultURL != "" {
++			if data, err = sjson.SetBytes(data, "metadata.url", resultURL); err != nil {
++				return nil, errors.Wrap(err, "set result url failed")
++			}
++		}
++		if data, err = sjson.DeleteBytes(data, "error"); err != nil {
++			return nil, errors.Wrap(err, "delete success error failed")
++		}
++	}
+ 	return data, nil
+ }
++
++func taskProgressValue(task *model.Task) int {
++	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
++		return 100
++	}
++	progress := strings.TrimSuffix(strings.TrimSpace(task.Progress), "%")
++	if progress == "" {
++		return -1
++	}
++	value, err := strconv.Atoi(progress)
++	if err != nil {
++		return -1
++	}
++	return value
++}
+diff --git a/relay/channel/task/sora/adaptor_test.go b/relay/channel/task/sora/adaptor_test.go
+index 361874a9a..5bf2b8a2f 100644
+--- a/relay/channel/task/sora/adaptor_test.go
++++ b/relay/channel/task/sora/adaptor_test.go
+@@ -151,6 +151,249 @@ func TestConvertToOpenAIVideoReplacesAssetTaskIDs(t *testing.T) {
+ 	}
+ }
+ 
++func TestConvertToOpenAIVideoNormalizesStoredSuccessWithResultURL(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++	task := &model.Task{
++		TaskID:     "task_public",
++		Status:     model.TaskStatusSuccess,
++		Progress:   "100%",
++		FinishTime: 1780839999,
++		PrivateData: model.TaskPrivateData{
++			ResultURL: "https://cdn.example.com/result.mp4",
++		},
++		Data: []byte(`{
++			"id":"video_upstream",
++			"task_id":"video_upstream",
++			"object":"video",
++			"model":"seedance",
++			"status":"unknown",
++			"progress":100,
++			"video_url":"https://cdn.example.com/result.mp4"
++		}`),
++	}
++
++	body, err := adaptor.ConvertToOpenAIVideo(task)
++	if err != nil {
++		t.Fatalf("ConvertToOpenAIVideo error = %v", err)
++	}
++	var out map[string]any
++	if err := json.Unmarshal(body, &out); err != nil {
++		t.Fatalf("response JSON error = %v body=%s", err, string(body))
++	}
++	if out["id"] != "task_public" || out["task_id"] != "task_public" {
++		t.Fatalf("unexpected task ids: %#v", out)
++	}
++	if out["status"] != dto.VideoStatusCompleted {
++		t.Fatalf("expected completed status, got %#v", out["status"])
++	}
++	if out["progress"] != float64(100) {
++		t.Fatalf("expected 100 progress, got %#v", out["progress"])
++	}
++	if out["completed_at"] != float64(1780839999) {
++		t.Fatalf("expected completed_at to follow task finish time, got %#v", out["completed_at"])
++	}
++	metadata, ok := out["metadata"].(map[string]any)
++	if !ok {
++		t.Fatalf("expected metadata object, got %#v", out["metadata"])
++	}
++	if metadata["url"] != "https://cdn.example.com/result.mp4" {
++		t.Fatalf("expected result url in metadata, got %#v", metadata)
++	}
++	if _, ok := out["error"]; ok {
++		t.Fatalf("expected success response not to expose error, got %#v", out["error"])
++	}
++}
++
++func TestParseTaskResultTreatsUnknownOpenAIVideoStatusAsInProgress(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
++		"id": "video_123",
++		"object": "video",
++		"model": "seedance",
++		"status": "unknown",
++		"progress": 0
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != model.TaskStatusInProgress {
++		t.Fatalf("expected unknown video status to stay in progress, got %s", taskInfo.Status)
++	}
++}
++
++func TestParseTaskResultTreatsMissingVideoStatusAsInProgress(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
++		"id": "video_123",
++		"object": "video",
++		"model": "seedance"
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != model.TaskStatusInProgress {
++		t.Fatalf("expected missing video status to stay in progress, got %s", taskInfo.Status)
++	}
++}
++
++func TestParseTaskResultTreatsUnknownStatusWithResultURLAsSuccess(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	tests := []struct {
++		name string
++		body string
++		url  string
++	}{
++		{
++			name: "top-level video_url",
++			body: `{
++				"id": "video_123",
++				"object": "video",
++				"model": "seedance",
++				"status": "unknown",
++				"video_url": "https://cdn.example.com/result.mp4"
++			}`,
++			url: "https://cdn.example.com/result.mp4",
++		},
++		{
++			name: "missing status top-level url",
++			body: `{
++				"url": "https://cdn.example.com/url-only-result.mp4"
++			}`,
++			url: "https://cdn.example.com/url-only-result.mp4",
++		},
++		{
++			name: "metadata url",
++			body: `{
++				"id": "video_123",
++				"object": "video",
++				"model": "seedance",
++				"status": "unknown",
++				"metadata": {
++					"url": "https://cdn.example.com/metadata-result.mp4"
++				}
++			}`,
++			url: "https://cdn.example.com/metadata-result.mp4",
++		},
++		{
++			name: "output video_url object",
++			body: `{
++				"id": "video_123",
++				"object": "video",
++				"model": "seedance",
++				"status": "unknown",
++				"output": {
++					"video_url": {
++						"url": "https://cdn.example.com/output-result.mp4"
++					}
++				}
++			}`,
++			url: "https://cdn.example.com/output-result.mp4",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			taskInfo, err := adaptor.ParseTaskResult([]byte(tt.body))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if taskInfo.Status != model.TaskStatusSuccess {
++				t.Fatalf("expected unknown status with result url to succeed, got %s", taskInfo.Status)
++			}
++			if taskInfo.Url != tt.url {
++				t.Fatalf("expected result url %q, got %q", tt.url, taskInfo.Url)
++			}
++		})
++	}
++}
++
++func TestParseTaskResultDoesNotCompleteUnknownStatusFromProgressOnly(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
++		"id": "video_123",
++		"object": "video",
++		"model": "seedance",
++		"status": "unknown",
++		"progress": 100
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != model.TaskStatusInProgress {
++		t.Fatalf("expected progress-only unknown status to stay in progress, got %s", taskInfo.Status)
++	}
++	if taskInfo.Progress == "100%" {
++		t.Fatalf("expected progress-only unknown status not to report complete progress")
++	}
++}
++
++func TestParseTaskResultTreatsMissingStatusVideoErrorAsFailure(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
++		"id": "video_123",
++		"object": "video",
++		"model": "seedance",
++		"error": {
++			"message": "upstream rejected video task",
++			"code": "invalid_request"
++		}
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != model.TaskStatusFailure {
++		t.Fatalf("expected missing status video error to fail, got %s", taskInfo.Status)
++	}
++	if taskInfo.Reason != "upstream rejected video task" {
++		t.Fatalf("expected upstream error reason, got %q", taskInfo.Reason)
++	}
++}
++
++func TestParseTaskResultKeepsErrorPriorityOverResultURL(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{
++		"id": "video_123",
++		"object": "video",
++		"model": "seedance",
++		"status": "unknown",
++		"video_url": "https://cdn.example.com/result.mp4",
++		"error": {
++			"message": "upstream failed after rendering",
++			"code": "render_failed"
++		}
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != model.TaskStatusFailure {
++		t.Fatalf("expected explicit error to win over result url, got %s", taskInfo.Status)
++	}
++	if taskInfo.Url != "" {
++		t.Fatalf("expected failed task not to expose result url, got %q", taskInfo.Url)
++	}
++	if taskInfo.Reason != "upstream failed after rendering" {
++		t.Fatalf("expected upstream error reason, got %q", taskInfo.Reason)
++	}
++}
++
++func TestParseTaskResultKeepsEmptyStatusForUnrecognizedPayload(t *testing.T) {
++	adaptor := &TaskAdaptor{}
++
++	taskInfo, err := adaptor.ParseTaskResult([]byte(`{}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if taskInfo.Status != "" {
++		t.Fatalf("expected unrecognized payload to keep empty status, got %s", taskInfo.Status)
++	}
++}
++
+ func TestEstimateBillingAddsAllReferenceVideoDurationsWhenDurationBillingEnabled(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 	t.Setenv("SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS", "seedance-2.0")

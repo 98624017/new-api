@@ -66,6 +66,12 @@
 - 影响范围：Sora/OpenAI 视频任务校验、资产任务计费倍率、公开任务 ID 响应重写、任务请求结构
 - 当前状态：已实现，并已生成 `patches/008-seedance-asset-library-videos.patch`
 
+### 009-sora-unknown-status-polling
+
+- 目标：兼容上游 NewAPI/OpenAI Videos 返回 `status: "unknown"` 或临时缺失状态，避免本地 Sora 轮询把仍在执行的任务提前标记失败；当未知状态已经携带明确结果 URL 时视为成功并同步对外查询/content 下载路径
+- 影响范围：Sora/OpenAI 视频任务状态解析、后台轮询失败判断、视频内容代理
+- 当前状态：已实现，并已生成 `patches/009-sora-unknown-status-polling.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`

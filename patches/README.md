@@ -517,6 +517,64 @@ make verify-patches
 
 ---
 
+## 009-sora-unknown-status-polling.patch
+
+**功能**：Sora/OpenAI Videos 轮询兼容上游 `status: "unknown"`，并在未知状态已经返回明确结果 URL 时兜底为成功，同时同步对外查询和内容下载路径。
+
+**背景**：当另一个 NewAPI 实例作为本项目的上游 Sora/OpenAI Videos 兼容渠道时，上游任务刚创建或还未完成状态归一时可能返回 `status: "unknown"`。旧版 Sora 适配器不识别该状态，后台轮询会把仍在执行的任务提前标记为 `upstream returned unrecognized message`。部分兼容上游还可能在状态仍为 `unknown` 时已经携带 `url` / `video_url` 等结果链接，需要避免任务一直停留在处理中，也要避免内部已成功但客户端查询仍看到 `unknown` 或内容下载继续请求上游 `/content`。
+
+**涉及文件（4 个）**：
+
+### 1. `relay/channel/task/sora/adaptor.go`
+
+扩展 Sora 任务状态归一化：
+
+- `unknown` -> `IN_PROGRESS`
+- 缺失 `status` 但具备视频任务特征且不带明确错误 -> `IN_PROGRESS`
+- 缺失 `status` 或 `unknown` 但带有明确 `error.message` / `error.code` -> `FAILURE`
+- 缺失 `status` 或 `unknown` 且已经返回明确结果 URL -> `SUCCESS`
+- `progress: 100` 但没有明确结果 URL -> 仍保持处理中，不单独视为成功
+- 已保存成功结果 URL 的任务对外转换为 `completed`，并在 `metadata.url` 中返回结果 URL
+- `submitted` / `not_start` -> `QUEUED`
+- `running` -> `IN_PROGRESS`
+- `succeeded` -> `SUCCESS`
+- `canceled` -> `FAILURE`
+
+空对象或真正不具备视频任务特征的响应仍保留空状态，由轮询层按无法识别响应处理。
+
+### 2. `controller/video_proxy.go`
+
+OpenAI/Sora content 代理优先使用已保存的非本地代理 `ResultURL`。当 `ResultURL` 为空或仍是本地 `/v1/videos/{task_id}/content` 代理 URL 时，保持原有上游 `/v1/videos/{upstream_id}/content` 请求行为。
+
+### 3. `relay/channel/task/sora/adaptor_test.go`
+
+补充状态兼容回归测试：
+
+- OpenAI 视频响应 `status: "unknown"` 保持处理中
+- 缺失 `status` 但包含视频任务字段时保持处理中
+- `status: "unknown"` 但包含顶层 `video_url`、`metadata.url` 或 `output.video_url.url` 时进入成功并保留结果 URL
+- `status: "unknown"` 且仅有 `progress: 100` 时仍保持处理中
+- 缺失 `status` 但包含明确错误时进入失败
+- 同时包含明确错误和结果 URL 时，错误优先，任务进入失败
+- `{}` 仍保留空状态，不吞掉真正无法识别的响应
+- 已保存成功结果 URL 的任务对外转换为 `completed`，并在 `metadata.url` 中返回结果 URL
+
+### 4. `controller/video_proxy_test.go`
+
+补充 content 下载回归测试：
+
+- Sora 成功任务已保存直链时，`/v1/videos/{id}/content` 命中保存的结果 URL，不再请求上游 `/content`
+
+### 回归验证
+
+```bash
+go test ./relay/channel/task/sora -count=1
+go test ./controller -run 'TestVideoProxyUsesStoredResultURLForSoraTask' -count=1
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
