@@ -27,6 +27,8 @@
 - `.github/workflows/sync-upstream.yml`
   - 保留上游同步 workflow。
   - workflow 运行时先把当前分支的 `patches/*.patch` 复制到临时目录，再从 `upstream/<branch>` 创建同步分支并应用临时目录中的补丁，避免在已打补丁分支上重复应用补丁。
+- `.github/workflows/electron-build.yml`
+  - 移除与当前部署链路无关的 Electron 桌面应用构建 workflow，避免误触发非 Docker 构建。
 - `.gitignore`
   - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify` 和 `meituapi/` 等本地验证/素材产物。
 - `AGENTS.md`
@@ -72,6 +74,7 @@ go test ./relay/common -count=1
 ## 6. 升级关注点
 
 - 上游若重构 Docker workflow，需要手动复核本地 GHCR workflow 是否仍需要保留。
+- 上游若重新引入 Electron workflow，需要确认当前项目是否真的需要桌面应用构建；默认不保留。
 - Docker workflow 中固定 SHA 的第三方 Action 需要定期复核；`cosign-installer` 应保持在支持当前 GitHub runner 和 cosign release 下载重试的版本，避免单架构签名安装失败导致多架构 manifest 不更新。
 - 上游同步 workflow 若调整分支创建方式，需要确认同步分支仍基于 upstream 干净分支，而不是当前已打补丁分支。
 - 上游若重构 relay request body 读取逻辑，需要重新确认 multipart 回归测试仍覆盖真实风险。

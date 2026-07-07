@@ -288,7 +288,7 @@ go test ./relay/common
 
 **背景**：当前项目除了业务二开外，还需要保留一组用于同步上游、验证补丁和稳定构建的本地维护文件。该补丁用于确保“项目锁定的原版 new-api + patches” 能重放到当前现状。
 
-**涉及文件（12 个）**：
+**涉及文件（13 个）**：
 
 ### 1. `.github/workflows/docker-image-manual-ghcr.yml`
 
@@ -298,39 +298,43 @@ go test ./relay/common
 
 保留上游同步 workflow。运行时先暂存当前分支的 `patches/*.patch`，再从 `upstream/<branch>` 创建同步分支并应用暂存补丁，避免在已打补丁分支上重复 apply。
 
-### 3. `.gitignore`
+### 3. `.github/workflows/electron-build.yml`
+
+移除与当前部署链路无关的 Electron 桌面应用构建 workflow，避免误触发非 Docker 构建。
+
+### 4. `.gitignore`
 
 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify` 和 `meituapi/` 等本地验证/素材产物。
 
-### 4. `AGENTS.md`
+### 5. `AGENTS.md`
 
 保留项目内 agent 工作约定。
 
-### 5. `README.md` / `README.zh_CN.md`
+### 6. `README.md` / `README.zh_CN.md`
 
 保留本地维护说明入口。
 
-### 6. `makefile`
+### 7. `makefile`
 
 保留 `verify-patches` 等本地维护命令。
 
-### 7. `relay/common/relay_utils.go`
+### 8. `relay/common/relay_utils.go`
 
 保留 multipart 请求体处理回归修复。
 
-### 8. `relay/common/relay_utils_test.go`
+### 9. `relay/common/relay_utils_test.go`
 
 覆盖 multipart 请求体回归测试。
 
-### 9. `scripts/sync_upstream_local.sh`
+### 10. `scripts/sync_upstream_local.sh`
 
 本地上游同步脚本。
 
-### 10. `scripts/verify_patches.sh`
+### 11. `scripts/verify_patches.sh`
 
 二开补丁配对和可重放校验脚本。
 
-### 11. `tools/skills/newapi-upstream-sync/SKILL.md`
+### 12. `tools/skills/newapi-upstream-sync/SKILL.md`
 
 本地上游同步 skill 说明。
 
