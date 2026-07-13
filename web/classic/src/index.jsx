@@ -1,5 +1,3 @@
-import '@douyinfe/semi-ui/react19-adapter';
-
 /*
 Copyright (C) 2025 QuantumNous
 
@@ -19,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
+import '@douyinfe/semi-ui/react19-adapter';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';

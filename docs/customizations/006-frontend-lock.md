@@ -20,6 +20,7 @@
 - `localStorage` 被禁用或访问失败时，正确密码仍可解锁当前 React 会话，但刷新后会再次要求输入。
 - 两套锁屏都会读取 `/api/notice` 和 `/api/status`，展示站点公告；公告请求失败不阻断密码输入。
 - 两套锁屏文案均接入各自前端的 i18n 体系；classic 使用中文源文案作为翻译键。
+- classic 新增 helper 与入口改动保持受保护版权头位于所有 import 之前，并通过定向 ESLint header 检查。
 - 后端服务请求路径不受影响，因为非浏览器客户端不会加载前端页面。
 - 本地 Vite 开发可使用 `VITE_FRONTEND_LOCK_PASSWORD` 预览锁屏。
 
@@ -43,6 +44,8 @@
 - `web/shared/frontend-lock.test.ts`
 - `web/default/src/main.tsx`
 - `web/default/src/features/frontend-lock/frontend-lock-gate.tsx`
+- `web/default/src/lib/frontend-cache.ts`
+- `web/default/src/lib/frontend-cache.test.ts`
 - `web/default/src/lib/frontend-lock.ts`
 - `web/default/rsbuild.config.ts`
 - `web/classic/src/index.jsx`
@@ -56,6 +59,7 @@
 go test . -run TestInjectFrontendLockPassword -count=1
 bun install --cwd web --frozen-lockfile
 bun test web/shared/frontend-lock.test.ts
+bun test web/default/src/lib/frontend-cache.test.ts
 bun run --cwd web/default typecheck
 bun run --cwd web/default build
 bun run --cwd web/classic build
