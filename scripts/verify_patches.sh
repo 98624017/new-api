@@ -134,23 +134,50 @@ run_replay_check() {
   )
 }
 
+wait_for_checks() {
+  local failure_message="$1"
+  shift
+  local failed=0
+  local pid
+  for pid in "$@"; do
+    if ! wait "$pid"; then
+      failed=1
+    fi
+  done
+  [[ "$failed" == "0" ]] || fail "$failure_message"
+}
+
 command -v bun >/dev/null 2>&1 || fail "未找到 bun，无法验证双前端补丁"
 run_replay_check "安装 patch 重放树的前端依赖" bun install --cwd web --frozen-lockfile
-run_replay_check "验证共享锁屏状态逻辑" bun test web/shared/frontend-lock.test.ts
-run_replay_check "编译 default 前端" bun run --cwd web/default build:check
-run_replay_check "编译 classic 前端" bun run --cwd web/classic build
+run_replay_check "验证共享锁屏状态逻辑" bun test \
+  web/shared/frontend-lock.test.ts \
+  web/default/src/lib/frontend-cache.test.ts
+
+build_pids=()
+run_replay_check "编译 default 前端" bun run --cwd web/default build:check &
+build_pids+=("$!")
+run_replay_check "编译 classic 前端" bun run --cwd web/classic build &
+build_pids+=("$!")
+wait_for_checks "双前端构建失败" "${build_pids[@]}"
+
 run_replay_check "编译 patch 重放后的 Go 项目" go build ./...
-run_replay_check "验证 001 API Key 自助能力" \
-  go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask|TestDeleteUserTokenAsset)' -count=1
-run_replay_check "验证 002 失败退款开关" \
-  go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded|TestUpdateVideoTasks_FailureRefund)' -count=1
-run_replay_check "验证 003 金额脱敏" \
-  go test ./common ./service ./types -run '(MaskBillingAmounts|MasksBillingAmounts)' -count=1
+
+test_pids=()
+run_replay_check "验证 001/008 API Key 自助与任务接口" \
+  go test ./controller -run '(TokenRedeem|GetUserTokenTask|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+test_pids+=("$!")
+run_replay_check "验证 002/003 退款开关与金额脱敏" \
+  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts)' -count=1 &
+test_pids+=("$!")
 run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
-  go test ./relay/channel/task/sora ./controller -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1
+  go test ./relay/channel/task/sora -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+test_pids+=("$!")
 run_replay_check "验证 005 multipart 回归" \
-  go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -count=1
+  go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -count=1 &
+test_pids+=("$!")
 run_replay_check "验证 006 双前端配置注入" \
-  go test . -run '^TestInjectFrontendLockPassword' -count=1
+  go test . -run '^TestInjectFrontendLockPassword' -count=1 &
+test_pids+=("$!")
+wait_for_checks "定制定向测试失败" "${test_pids[@]}"
 
 info "二开 patch 重放、编译与定制回归校验通过"

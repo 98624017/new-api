@@ -37,7 +37,7 @@
 - 上游 Docker workflow
   - 目标上游已经通过 `docker-build.yml` 和 `docker-image-branch.yml` 提供原生 amd64/arm64 多架构构建；旧的独立 alpha/arm64 workflow 不再恢复。
 - `.gitignore`
-  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify` 和 `meituapi/` 等本地验证/素材产物。
+  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify`、Playwright CLI 证据目录和 `meituapi/` 等本地验证/素材产物。
 - `AGENTS.md`
   - 保留项目内 agent 工作约定。
 - `README.md` / `README.zh_CN.md`
@@ -52,7 +52,8 @@
   - 本地上游同步脚本。
 - `scripts/verify_patches.sh`
   - 校验文档与补丁配对、补丁顺序应用和 patch 所属文件最终一致性。
-  - 在临时重放树中按顺序执行 Bun 干净安装、共享锁屏测试、default/classic 构建、Go 全量编译和定制定向测试。
+  - 在临时重放树中执行 Bun 干净安装、共享锁屏与 default 缓存保留测试、default/classic 构建、Go 全量编译和定制定向测试。
+  - 两套前端并行构建；Go 编译等待两套产物完成；定向测试按互不重叠的 Go package 分组并行，确保完整门禁可在 120 秒总时限内完成。
 - `web/classic/package.json` / `web/bun.lock`
   - classic 显式固定 `date-fns@2.30.0` 与 `date-fns-tz@1.3.8`，避免 Bun workspace 把旧版 `date-fns-tz` 提升后错误解析到 default 使用的 `date-fns@4`。
 - `tools/skills/newapi-upstream-sync/SKILL.md`
@@ -64,6 +65,7 @@
 - `scripts/verify_patches.sh` 默认基准锁定为当前项目使用的原版 new-api commit，切换上游基准时需显式设置 `PATCH_BASE_REF`。
 - patch 重放树必须与当前集成树中的所有 patch 所属文件逐字一致；新增源文件遗漏会直接失败。
 - Go 主程序通过 `embed` 依赖两套前端产物，因此验证顺序必须先构建前端，再执行 `go build ./...`。
+- 并行回归不得让两个 `go test` 进程同时执行同一 package；新增定制测试时必须合并到现有 package 分组或重新划分互斥分组。
 - multipart 回归修复位于通用 relay 工具函数，需避免影响非 multipart 请求体处理。
 - GitHub Actions 上游同步 workflow 依赖当前分支的 `patches/*.patch` 作为临时补丁源；同步分支切到 upstream 后，不能再从工作区 `patches/` 读取补丁。
 
@@ -75,7 +77,7 @@
 make verify-patches
 ```
 
-该命令已包含 multipart、9 组定制、双前端和 Go 编译验证；每个编译或测试子命令最多运行 120 秒。
+该命令已包含 multipart、9 组定制、双前端和 Go 编译验证；每个编译或测试子命令最多运行 120 秒，完整门禁也应在外层 120 秒限制内完成。
 
 ## 6. 升级关注点
 

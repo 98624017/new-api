@@ -97,6 +97,82 @@ if IsAllowlisted(modelName) && hasReferenceVideo {
 
 (To be filled by the team)
 
+### Scenario: Replayable Customization Chain And Embedded Dual Frontends
+
+#### 1. Scope / Trigger
+
+- Trigger: a local customization changes code, tests, frontend dependencies, embedded frontend assets, or cache initialization.
+- Applies to `patches/*.patch`, `scripts/verify_patches.sh`, `web/default`, `web/classic`, `web/shared`, and Go builds that embed frontend `dist` directories.
+
+#### 2. Signatures
+
+- Full gate: `make verify-patches`.
+- Locked upstream input: `PATCH_BASE_REF`, defaulted in `scripts/verify_patches.sh`.
+- Frontend install: `bun install --cwd web --frozen-lockfile`.
+- Required frontend outputs: `web/default/dist` and `web/classic/dist` before `go build ./...`.
+- Shared lock cache key: `FRONTEND_LOCK_STORAGE_KEY` from `web/shared/frontend-lock`.
+
+#### 3. Contracts
+
+- Applying `patches/001-*.patch` through `patches/009-*.patch` to `PATCH_BASE_REF` must reproduce every patch-owned path byte for byte from the integration tree.
+- Patch application alone is not success. The replay tree must install locked Bun dependencies, test shared frontend state, build both frontends, compile Go, and run customization regressions.
+- `web/classic` must explicitly pin `date-fns@2.30.0` and `date-fns-tz@1.3.8` while `web/default` uses its newer dependency line. Do not rely on Bun workspace hoisting to select a compatible transitive version.
+- Both frontend builds may run in parallel, but `go build ./...` must wait for both because Go `embed` consumes both output trees.
+- Parallel Go regression groups must not execute the same package in two processes.
+- Default frontend cache cleanup must preserve `FRONTEND_LOCK_STORAGE_KEY`; default and classic share one unlock record across frontend switches.
+
+#### 4. Validation & Error Matrix
+
+- Source or test change without its customization patch -> fail before replay.
+- Patch applies but a new source file is absent from the patch -> final-tree comparison or build must fail.
+- Classic resolves `date-fns-tz@1.3.8` against `date-fns@4` -> classic build must fail; restore the explicit classic pin and lockfile.
+- Either frontend `dist` is missing -> Go build is invalid and must not start.
+- A frontend build or any parallel regression exits non-zero -> wait for all started jobs, then fail the gate.
+- Default cache initialization deletes the shared lock key -> the cache regression must fail because switching frontends would require an unexpected second unlock.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: update code, its numbered patch, and customization documentation; replay from the locked upstream base; compare final paths; build and test the replay tree.
+- Base: documentation-only task delivery outside a customization may remain outside the numbered patch chain, but must not change runtime behavior.
+- Bad: accept `git apply --check` as sufficient evidence, build Go before frontend assets exist, or let two parallel commands test the same Go package.
+
+#### 6. Tests Required
+
+- Run `make verify-patches` under an outer 120-second timeout.
+- Assert all numbered patches apply in order and replay-owned paths equal the integration tree.
+- Run `web/shared/frontend-lock.test.ts` and `web/default/src/lib/frontend-cache.test.ts`; assert the shared unlock survives default cache initialization.
+- Build `web/default` and `web/classic`, then run `go build ./...`.
+- Run the numbered customization regression groups and assert every background job exit status is collected.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```bash
+git apply --check patches/*.patch
+go build ./...
+```
+
+```ts
+const PRESERVED_LOCAL_STORAGE_KEYS = new Set(['user', 'uid'])
+```
+
+##### Correct
+
+```bash
+timeout 120s make verify-patches
+```
+
+```ts
+import { FRONTEND_LOCK_STORAGE_KEY } from '../../../shared/frontend-lock'
+
+const PRESERVED_LOCAL_STORAGE_KEYS = new Set([
+  'user',
+  'uid',
+  FRONTEND_LOCK_STORAGE_KEY,
+])
+```
+
 ---
 
 ## Code Review Checklist

@@ -42,6 +42,7 @@ meituapi/
 .test
 skills-lock.json
 .playwright-mcp
+.playwright-cli/
 
 # Local-only live probes and scratch test workspaces.
 .local-tests/
