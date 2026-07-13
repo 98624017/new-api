@@ -84,10 +84,10 @@ index 000000000..6d4c7e265
 +}
 diff --git a/scripts/seed_task_refund_fixture.go b/scripts/seed_task_refund_fixture.go
 new file mode 100644
-index 000000000..ac7fd9e76
+index 000000000..6ba013dfe
 --- /dev/null
 +++ b/scripts/seed_task_refund_fixture.go
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,242 @@
 +//go:build ignore
 +
 +package main
@@ -172,7 +172,7 @@ index 000000000..ac7fd9e76
 +}
 +
 +func ensureSchema(db *gorm.DB) error {
-+	common.UsingSQLite = true
++	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 +
 +	return db.AutoMigrate(
 +		&model.Setup{},
@@ -181,11 +181,12 @@ index 000000000..ac7fd9e76
 +		&model.Channel{},
 +		&model.Task{},
 +		&model.Log{},
++		&model.SystemTask{},
 +	)
 +}
 +
 +func seedFixture(db *gorm.DB, baseURL string) error {
-+	common.UsingSQLite = true
++	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 +
 +	if err := db.Exec("DELETE FROM tasks").Error; err != nil {
 +		return err
@@ -290,7 +291,20 @@ index 000000000..ac7fd9e76
 +			},
 +		},
 +	}
-+	return db.Create(task).Error
++	if err := db.Create(task).Error; err != nil {
++		return err
++	}
++
++	return db.Create(&model.SystemTask{
++		TaskID:    "systask_refund_fixture_delay",
++		Type:      model.SystemTaskTypeAsyncTaskPoll,
++		Status:    model.SystemTaskStatusSucceeded,
++		Payload:   "null",
++		State:     "null",
++		Result:    "null",
++		CreatedAt: now,
++		UpdatedAt: now,
++	}).Error
 +}
 +
 +func inspectFixture(db *gorm.DB) error {

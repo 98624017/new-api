@@ -82,7 +82,7 @@ func main() {
 }
 
 func ensureSchema(db *gorm.DB) error {
-	common.UsingSQLite = true
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 
 	return db.AutoMigrate(
 		&model.Setup{},
@@ -91,11 +91,12 @@ func ensureSchema(db *gorm.DB) error {
 		&model.Channel{},
 		&model.Task{},
 		&model.Log{},
+		&model.SystemTask{},
 	)
 }
 
 func seedFixture(db *gorm.DB, baseURL string) error {
-	common.UsingSQLite = true
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 
 	if err := db.Exec("DELETE FROM tasks").Error; err != nil {
 		return err
@@ -200,7 +201,20 @@ func seedFixture(db *gorm.DB, baseURL string) error {
 			},
 		},
 	}
-	return db.Create(task).Error
+	if err := db.Create(task).Error; err != nil {
+		return err
+	}
+
+	return db.Create(&model.SystemTask{
+		TaskID:    "systask_refund_fixture_delay",
+		Type:      model.SystemTaskTypeAsyncTaskPoll,
+		Status:    model.SystemTaskStatusSucceeded,
+		Payload:   "null",
+		State:     "null",
+		Result:    "null",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error
 }
 
 func inspectFixture(db *gorm.DB) error {

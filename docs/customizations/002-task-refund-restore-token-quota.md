@@ -112,6 +112,8 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 - 先启动 `scripts/mock_video_failure_server.go`，在宿主机模拟一个失败的 `videos` 上游查询接口
 - 再用 `scripts/seed_task_refund_fixture.go` 离线生成 fixture，写入真实视频任务字段：
+  - fixture 通过 `common.SetDatabaseTypes` 显式声明主库和日志库均为 SQLite，避免依赖已被上游移除的数据库类型全局变量；
+  - fixture 预置一条刚完成的 `async_task_poll` 系统任务，使目标上游调度器等待固定 15 秒周期，确保脚本先读取退款前额度，再由真实调度器触发 mock 轮询；
   - `channel.type = Sora`
   - `task.platform = "55"`
   - `private_data.upstream_task_id = upstream-video-failure-001`
