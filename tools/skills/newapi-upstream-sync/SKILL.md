@@ -73,21 +73,23 @@ scripts/sync_upstream_local.sh
 
 ## Required Verification
 
-默认验证以下回归点：
+默认执行：
 
 ```bash
 make verify-patches
-go test ./controller -run '^TestTokenRedeem' -v
-go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v
-go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v
 ```
 
-原因：
+该命令会在锁定上游提交 `7c28993f6bd9e92616f3f578212577f8b7c40b45`
+创建临时 worktree，按编号应用全部补丁，然后验证：
 
-- 第 0 组验证二开 patch 登记完整，并能按顺序应用到 `upstream/main`
-- 第 1 组验证 `001-token-redeem-via-apikey`
-- 第 2 组验证 `002-task-refund-restore-token-quota`
-- 第 3 组验证上游 multipart 任务请求回归的本地兼容修复
+- 补丁重放树与当前集成树中的 patch 所属文件完全一致
+- Go 全量编译
+- `001` 到 `009` 的后端定向回归
+- 双前端锁屏共享逻辑测试
+- default 与 classic 两套前端构建
+
+每个编译或测试子命令都由 `timeout 120s` 限制。同步到新的上游提交时，
+必须先重建补丁并更新锁定基线，不能把“旧补丁碰巧可应用”当作同步完成。
 
 ## Decision Rules
 
@@ -121,7 +123,7 @@ docs/customizations/README.md
 
 ## Notes
 
-- `.spec-workflow/` 默认允许保持未跟踪状态，不阻塞同步
+- 本地同步要求工作区完全干净；Trellis 任务或其他未提交文件也必须先隔离
 - 这个技能假设远端命名仍为 `origin` / `upstream`
 - 如果后续新增 patch，记得同步更新脚本验证清单和本技能内容
 - 修改既有二开时，先更新对应 `patches/NNN-*.patch`，再合并

@@ -1,5 +1,7 @@
 # 009-sora-unknown-status-polling
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 1. 背景
 
 当本项目把另一个 NewAPI 实例作为上游 Sora/OpenAI Videos 兼容渠道时，上游任务刚创建或还未完成状态归一时，`GET /v1/videos/{task_id}` 可能返回 OpenAI 视频格式的 `status: "unknown"`。

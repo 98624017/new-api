@@ -1,8 +1,8 @@
 diff --git a/controller/video_proxy.go b/controller/video_proxy.go
-index 520d313a3..d4d9fb924 100644
+index 996d084d8..15378fc5b 100644
 --- a/controller/video_proxy.go
 +++ b/controller/video_proxy.go
-@@ -107,8 +107,12 @@ func VideoProxy(c *gin.Context) {
+@@ -112,8 +112,12 @@ func VideoProxy(c *gin.Context) {
  			return
  		}
  	case constant.ChannelTypeOpenAI, constant.ChannelTypeSora:

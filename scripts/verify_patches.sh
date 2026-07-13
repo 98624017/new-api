@@ -3,7 +3,7 @@ set -euo pipefail
 
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
-PATCH_BASE_REF_DEFAULT="${PATCH_BASE_REF_DEFAULT:-22e509c1efb2260e1537c78684f1a5e9f053b75a}"
+PATCH_BASE_REF_DEFAULT="${PATCH_BASE_REF_DEFAULT:-7c28993f6bd9e92616f3f578212577f8b7c40b45}"
 PATCH_BASE_REF="${PATCH_BASE_REF:-${PATCH_BASE_REF_DEFAULT}}"
 ALLOW_UNPATCHED_CHANGES="${ALLOW_UNPATCHED_CHANGES:-0}"
 
@@ -80,6 +80,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+declare -A PATCHED_PATHS=()
+
 info "在干净基准 ${PATCH_BASE_REF} 上按顺序验证 patch 可应用"
 git worktree add --detach "$tmp_dir" "$PATCH_BASE_REF" >/dev/null
 
@@ -87,6 +89,9 @@ for patch in "${PATCH_FILES[@]}"; do
   patch_abs="${REPO_ROOT}/${patch}"
   patch_name="$(basename "$patch")"
   info "验证 ${patch_name}"
+  while IFS=$'\t' read -r _ _ path; do
+    [[ -n "$path" ]] && PATCHED_PATHS["$path"]=1
+  done < <(git apply --numstat "$patch_abs")
   (
     cd "$tmp_dir"
     if git apply --check "$patch_abs" 2>/dev/null; then
@@ -102,4 +107,50 @@ for patch in "${PATCH_FILES[@]}"; do
   )
 done
 
-info "二开 patch 校验通过"
+info "检查 patch 重放结果与当前集成树一致"
+while IFS= read -r path; do
+  current_path="${REPO_ROOT}/${path}"
+  replay_path="${tmp_dir}/${path}"
+  if [[ -e "$current_path" || -L "$current_path" ]]; then
+    [[ -e "$replay_path" || -L "$replay_path" ]] || fail "重放树缺少 patch 文件: $path"
+    cmp -s "$current_path" "$replay_path" || fail "重放树与当前集成树不一致: $path"
+  elif [[ -e "$replay_path" || -L "$replay_path" ]]; then
+    fail "当前集成树已删除文件，但重放树仍存在: $path"
+  fi
+done < <(printf '%s\n' "${!PATCHED_PATHS[@]}" | sort)
+
+mkdir -p /tmp/go-build-cache /tmp/go-tmp /tmp/gomodcache
+
+run_replay_check() {
+  local label="$1"
+  shift
+  info "$label"
+  (
+    cd "$tmp_dir"
+    env GOCACHE=/tmp/go-build-cache \
+      GOTMPDIR=/tmp/go-tmp \
+      GOMODCACHE=/tmp/gomodcache \
+      timeout 120s "$@"
+  )
+}
+
+command -v bun >/dev/null 2>&1 || fail "未找到 bun，无法验证双前端补丁"
+run_replay_check "安装 patch 重放树的前端依赖" bun install --cwd web --frozen-lockfile
+run_replay_check "验证共享锁屏状态逻辑" bun test web/shared/frontend-lock.test.ts
+run_replay_check "编译 default 前端" bun run --cwd web/default build:check
+run_replay_check "编译 classic 前端" bun run --cwd web/classic build
+run_replay_check "编译 patch 重放后的 Go 项目" go build ./...
+run_replay_check "验证 001 API Key 自助能力" \
+  go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask|TestDeleteUserTokenAsset)' -count=1
+run_replay_check "验证 002 失败退款开关" \
+  go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded|TestUpdateVideoTasks_FailureRefund)' -count=1
+run_replay_check "验证 003 金额脱敏" \
+  go test ./common ./service ./types -run '(MaskBillingAmounts|MasksBillingAmounts)' -count=1
+run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
+  go test ./relay/channel/task/sora ./controller -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1
+run_replay_check "验证 005 multipart 回归" \
+  go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -count=1
+run_replay_check "验证 006 双前端配置注入" \
+  go test . -run '^TestInjectFrontendLockPassword' -count=1
+
+info "二开 patch 重放、编译与定制回归校验通过"

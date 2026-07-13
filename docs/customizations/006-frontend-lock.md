@@ -1,5 +1,7 @@
 # 006-frontend-lock
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 目标
 
 增加一个可选的前端弱隐藏门禁。部署者设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问 new-api 前端页面会先看到锁屏和公告；输入正确密码后，当前浏览器会缓存解锁状态并继续访问原前端。
@@ -51,10 +53,10 @@
 
 ```bash
 go test . -run TestInjectFrontendLockPassword -count=1
-bun --cwd web test shared/frontend-lock.test.ts
-bun --cwd web/default run typecheck
-bun --cwd web/default run build
-bun --cwd web install --filter ./classic --frozen-lockfile
-bun --cwd web/classic run build
+bun install --cwd web --frozen-lockfile
+bun test web/shared/frontend-lock.test.ts
+bun run --cwd web/default typecheck
+bun run --cwd web/default build
+bun run --cwd web/classic build
 make verify-patches
 ```

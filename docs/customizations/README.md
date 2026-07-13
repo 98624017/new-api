@@ -15,6 +15,7 @@
 - patch 只承载代码差异，不承载完整业务背景
 - 业务背景、规则、风险、测试方式统一记录在 `docs/customizations`
 - 新增二开时，必须同步更新本文件
+- 当前补丁链锁定上游提交 `7c28993f6bd9e92616f3f578212577f8b7c40b45`
 
 ## 当前二开清单
 
@@ -77,7 +78,7 @@
 1. 拉取并合并上游 `new-api`
 2. 按编号顺序重放 `patches/*.patch`
 3. 执行二开最小回归测试
-4. 执行 `go build ./...`
+4. 从干净依赖安装构建 default/classic 两套前端，再执行 `go build ./...`
 5. 通过后再推送同步分支或创建 PR
 
 ## 二开新增流程
@@ -92,15 +93,12 @@
 
 ```bash
 make verify-patches
-go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
-go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
-go test ./common -run TestMaskBillingAmountsForClient -count=1
-go test ./types -run 'TestNewAPIError(To|MaskSensitiveErrorWithStatusCode)' -count=1
-go test ./relay/channel/task/sora ./relay/common -count=1
-go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
-go test . -run TestInjectFrontendLockPassword -count=1
-(cd web && bun run build)
-go build ./...
 ```
 
-默认 patch 校验基准是当前项目锁定的原版 new-api：`22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。验证其他上游基准时显式设置 `PATCH_BASE_REF`。
+`make verify-patches` 会在临时 worktree 中按顺序重放 001-009，检查 patch
+所属文件与当前集成树一致，然后执行前端干净安装、共享锁屏测试、双前端构建、
+Go 全量编译和 9 组定向回归。每个编译或测试子命令最多运行 120 秒。
+
+默认 patch 校验基准是当前项目锁定的原版 new-api：
+`7c28993f6bd9e92616f3f578212577f8b7c40b45`。验证其他上游基准时显式设置
+`PATCH_BASE_REF`，并在确认行为兼容后重建全部补丁。

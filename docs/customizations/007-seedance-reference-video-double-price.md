@@ -1,5 +1,7 @@
 # 007-seedance-reference-video-double-price
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 1. 背景
 
 Seedance 视频生成在当前部署中通过 NewAPI 的 `Sora` / `OpenAI` 视频任务机制接入：后台渠道类型仍选择 `Sora` 或 `OpenAI`，上游 Base URL 指向兼容 `/v1/videos` 的 Seedance 服务。
