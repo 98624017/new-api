@@ -14,6 +14,10 @@ export default defineConfig(({ envMode }) => {
     process.env.VITE_REACT_APP_SERVER_URL ||
     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
     'http://localhost:3000'
+  const frontendLockPassword =
+    process.env.VITE_FRONTEND_LOCK_PASSWORD ||
+    env.rawPublicVars.VITE_FRONTEND_LOCK_PASSWORD ||
+    ''
 
   const isProd = envMode === 'production'
   const devProxy = Object.fromEntries(
@@ -55,6 +59,10 @@ export default defineConfig(({ envMode }) => {
     source: {
       entry: {
         index: './src/main.tsx',
+      },
+      define: {
+        'import.meta.env.VITE_FRONTEND_LOCK_PASSWORD':
+          JSON.stringify(frontendLockPassword),
       },
     },
     resolve: {

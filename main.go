@@ -307,13 +307,17 @@ func InjectFrontendLockPassword() {
 		return
 	}
 
+	indexPage = injectFrontendLockPassword(indexPage, passwordJSON)
+	classicIndexPage = injectFrontendLockPassword(classicIndexPage, passwordJSON)
+}
+
+func injectFrontendLockPassword(page []byte, passwordJSON []byte) []byte {
 	script := []byte("<script>window.__FRONTEND_LOCK_PASSWORD__=" + string(passwordJSON) + ";</script>\n")
 	headEnd := []byte("</head>")
-	if bytes.Contains(indexPage, headEnd) {
-		indexPage = bytes.Replace(indexPage, headEnd, append(script, headEnd...), 1)
-		return
+	if bytes.Contains(page, headEnd) {
+		return bytes.Replace(page, headEnd, append(script, headEnd...), 1)
 	}
-	indexPage = append(indexPage, script...)
+	return append(page, script...)
 }
 
 func InitResources() error {
