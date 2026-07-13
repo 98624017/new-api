@@ -21,6 +21,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Empty, Input, Timeline, Typography } from '@douyinfe/semi-ui';
 import { LockKeyhole, Megaphone } from 'lucide-react';
 import { marked } from 'marked';
+import { useTranslation } from 'react-i18next';
 import { API } from '../../helpers';
 import {
   unlockFrontendSession,
@@ -30,6 +31,7 @@ import {
 const { Text, Title } = Typography;
 
 const FrontendLock = ({ onUnlock }) => {
+  const { t } = useTranslation();
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [noticeHtml, setNoticeHtml] = useState('');
@@ -95,7 +97,7 @@ const FrontendLock = ({ onUnlock }) => {
   const handleSubmit = (event) => {
     event.preventDefault();
     if (!verifyFrontendLockPassword(password)) {
-      setError('密码不正确');
+      setError(t('密码不正确'));
       return;
     }
 
@@ -114,10 +116,12 @@ const FrontendLock = ({ onUnlock }) => {
             </div>
             <div className='space-y-3'>
               <Title heading={2} className='!m-0'>
-                访问已锁定
+                {t('访问已锁定')}
               </Title>
               <Text type='tertiary'>
-                请输入访问密码继续访问内部项目服务。本服务不对外提供访问。
+                {t(
+                  '请输入访问密码继续访问内部项目服务。本服务不对外提供访问。',
+                )}
               </Text>
             </div>
 
@@ -126,7 +130,7 @@ const FrontendLock = ({ onUnlock }) => {
                 type='password'
                 value={password}
                 onChange={setPassword}
-                placeholder='输入访问密码'
+                placeholder={t('输入访问密码')}
                 size='large'
                 autoFocus
               />
@@ -138,7 +142,7 @@ const FrontendLock = ({ onUnlock }) => {
                 size='large'
                 block
               >
-                解锁访问
+                {t('解锁访问')}
               </Button>
             </form>
           </div>
@@ -148,20 +152,20 @@ const FrontendLock = ({ onUnlock }) => {
               <div className='flex items-center gap-2'>
                 <Megaphone size={18} />
                 <Title heading={4} className='!m-0'>
-                  站点公告
+                  {t('站点公告')}
                 </Title>
               </div>
             </div>
 
             {loadingNotice ? (
-              <Empty description='公告加载中...' />
+              <Empty description={t('公告加载中...')} />
             ) : noticeHtml ? (
               <div
                 className='notice-content-scroll max-h-72 overflow-y-auto pr-2 leading-7'
                 dangerouslySetInnerHTML={{ __html: noticeHtml }}
               />
             ) : (
-              <Empty description='暂无公告' />
+              <Empty description={t('暂无公告')} />
             )}
 
             {processedAnnouncements.length > 0 && (
