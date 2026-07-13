@@ -36,3 +36,5 @@ token_estimator_test.go
 # local generated verification/artifact outputs
 .tmp-newapi-verify
 meituapi/
+API-Reference 1.7.1.md
+docs/installation/nginx-upstream-failover.md
