@@ -12,15 +12,19 @@
   "assignee": "feng",
   "createdAt": "2026-07-13",
   "completedAt": "2026-07-13",
-  "branch": null,
+  "branch": "sync/upstream-7c28993f",
   "base_branch": "main",
-  "worktree_path": null,
-  "commit": null,
+  "worktree_path": "/home/feng/project/new-api-sync-7c28993f",
+  "commit": "d698c94b186e61111c5fa371408aae3113d54295",
   "pr_url": null,
   "subtasks": [],
   "children": [],
   "parent": null,
-  "relatedFiles": [],
-  "notes": "",
+  "relatedFiles": [
+    "docs/installation/upstream-7c28993f-upgrade-runbook.md",
+    "scripts/verify_patches.sh",
+    "verification.md"
+  ],
+  "notes": "集成结果保留在独立分支等待审核，未推送且未合并 main。2026-07-16 已重新执行补丁重放、定向回归和 Docker 数据库矩阵；详见 verification.md。",
   "meta": {}
 }
