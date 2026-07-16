@@ -1,5 +1,7 @@
 # 004-sora-reference-video-double-price
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 1. 背景
 
 部分走 `/v1/videos` 的 Sora 兼容请求会在 `content` 数组中携带参考视频：
@@ -92,6 +94,7 @@ SORA_REFERENCE_VIDEO_DURATION_BILLING_ENABLED=true
   - Worker 请求支持 context 取消，确保参考视频检测超时时 Worker 模式也能及时返回
 - `relay/channel/task/sora/adaptor_test.go`
   - 覆盖多参考视频累加、Range 失败回退完整下载、解析失败拒绝、超时拒绝，以及未配置时不生效
+  - 该共享测试文件由后续 `007` 补丁首次创建，完整 001-009 补丁链统一执行这些测试
 
 ## 5. 风险点
 
@@ -139,4 +142,4 @@ make verify-patches
 - 已实现 Range 优先、完整受限下载回退
 - 已实现精确计费开启时检测失败或超时拒绝请求
 - 已补充 Sora 适配器测试
-- 已生成 `patches/004-sora-reference-video-double-price.patch`
+- 已生成 `patches/004-sora-reference-video-double-price.patch`，并纳入完整补丁链回归

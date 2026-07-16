@@ -448,6 +448,11 @@ func ProcessTools(tools []any) ([]*Tool, []*ClaudeWebSearchTool) {
 type Thinking struct {
 	Type         string `json:"type,omitempty"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	// Display controls whether thinking content is returned in the response.
+	// Used with adaptive thinking on Claude Opus 4.7+: "summarized" restores
+	// the visible summary that was default on Opus 4.6; "omitted" (default on
+	// 4.7) suppresses it. Pass-through field from upstream Anthropic API.
+	Display string `json:"display,omitempty"`
 }
 
 func (c *Thinking) GetBudgetTokens() int {
@@ -559,6 +564,7 @@ type ClaudeUsage struct {
 	ClaudeCacheCreation5mTokens int                  `json:"claude_cache_creation_5_m_tokens"`
 	ClaudeCacheCreation1hTokens int                  `json:"claude_cache_creation_1_h_tokens"`
 	ServerToolUse               *ClaudeServerToolUse `json:"server_tool_use,omitempty"`
+	BillingUsage                *BillingUsage        `json:"billing_usage,omitempty"`
 }
 
 type ClaudeCacheCreationUsage struct {

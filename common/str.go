@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -23,6 +24,16 @@ var (
 	maskBillingLabelPrefixPattern    = regexp.MustCompile(`(?i)(用户剩余额度|剩余额度|需要预扣费额度|预扣费额度|令牌剩余额度|token remain quota|remain quota|remaining quota|user quota|need quota|required quota|available quota|balance|credit|quota|amount|cost|price|need)\s*[:：=]\s*`)
 	maskBillingNumberPattern         = regexp.MustCompile(`-?\d+(?:,\d{3})*(?:\.\d+)?`)
 )
+
+const LocalLogContentLimit = 2048
+
+// LocalLogPreview limits log-only content unless debug logging is enabled.
+func LocalLogPreview(content string) string {
+	if DebugEnabled || len(content) <= LocalLogContentLimit {
+		return content
+	}
+	return fmt.Sprintf("%s... [truncated, original_length=%d, limit=%d]", content[:LocalLogContentLimit], len(content), LocalLogContentLimit)
+}
 
 func GetStringIfEmpty(str string, defaultValue string) string {
 	if str == "" {

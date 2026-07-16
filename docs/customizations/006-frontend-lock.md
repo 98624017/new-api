@@ -1,5 +1,7 @@
 # 006-frontend-lock
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 目标
 
 增加一个可选的前端弱隐藏门禁。部署者设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问 new-api 前端页面会先看到锁屏和公告；输入正确密码后，当前浏览器会缓存解锁状态并继续访问原前端。
@@ -11,9 +13,14 @@
 ## 行为
 
 - `FRONTEND_LOCK_PASSWORD` 为空：前端不显示锁屏，行为与原项目一致。
-- `FRONTEND_LOCK_PASSWORD` 非空：Go 服务启动时把密码注入到 `index.html` 的 `window.__FRONTEND_LOCK_PASSWORD__`。
+- `FRONTEND_LOCK_PASSWORD` 非空：Go 服务启动时把同一密码分别注入 `default` 与 `classic` 两份 `index.html` 的 `window.__FRONTEND_LOCK_PASSWORD__`。
 - 前端加载后，如果当前浏览器尚未解锁、解锁缓存已过期，或解锁缓存对应的密码已变化，则显示锁屏页。
 - 密码正确后写入 `localStorage`，解锁状态在当前浏览器缓存 2592000 秒（30 天），与后端用户登录 session cookie 的 `MaxAge` 保持一致。
+- `default` 与 `classic` 共用相同的存储 key、TTL、密码指纹和异常存储降级逻辑；在同一域名下切换前端不会重复要求解锁。
+- `localStorage` 被禁用或访问失败时，正确密码仍可解锁当前 React 会话，但刷新后会再次要求输入。
+- 两套锁屏都会读取 `/api/notice` 和 `/api/status`，展示站点公告；公告请求失败不阻断密码输入。
+- 两套锁屏文案均接入各自前端的 i18n 体系；classic 使用中文源文案作为翻译键。
+- classic 新增 helper 与入口改动保持受保护版权头位于所有 import 之前，并通过定向 ESLint header 检查。
 - 后端服务请求路径不受影响，因为非浏览器客户端不会加载前端页面。
 - 本地 Vite 开发可使用 `VITE_FRONTEND_LOCK_PASSWORD` 预览锁屏。
 
@@ -32,14 +39,29 @@
 
 - `main.go`
 - `main_test.go`
-- `web/src/index.jsx`
-- `web/src/components/common/FrontendLock.jsx`
-- `web/src/helpers/frontendLock.js`
+- `Dockerfile`
+- `web/shared/frontend-lock.ts`
+- `web/shared/frontend-lock.test.ts`
+- `web/default/src/main.tsx`
+- `web/default/src/features/frontend-lock/frontend-lock-gate.tsx`
+- `web/default/src/lib/frontend-cache.ts`
+- `web/default/src/lib/frontend-cache.test.ts`
+- `web/default/src/lib/frontend-lock.ts`
+- `web/default/rsbuild.config.ts`
+- `web/classic/src/index.jsx`
+- `web/classic/src/components/common/FrontendLock.jsx`
+- `web/classic/src/helpers/frontendLock.js`
+- `web/classic/rsbuild.config.ts`
 
 ## 验证
 
 ```bash
 go test . -run TestInjectFrontendLockPassword -count=1
-cd web && bun run build
+bun install --cwd web --frozen-lockfile
+bun test web/shared/frontend-lock.test.ts
+bun test web/default/src/lib/frontend-cache.test.ts
+bun run --cwd web/default typecheck
+bun run --cwd web/default build
+bun run --cwd web/classic build
 make verify-patches
 ```

@@ -42,6 +42,8 @@ jobs:
         run: |
           git remote add upstream "${{ inputs.upstream_repo }}" || true
           git fetch upstream "${{ inputs.upstream_branch }}"
+          UPSTREAM_SHA="$(git rev-parse "upstream/${{ inputs.upstream_branch }}")"
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> "$GITHUB_ENV"
 
       - name: Show upstream diff summary
         run: |
@@ -53,13 +55,15 @@ jobs:
           echo "Total new commits: $COMMIT_COUNT" >> $GITHUB_STEP_SUMMARY
           echo "::notice::Upstream has $COMMIT_COUNT new commits"
 
-      - name: Stage local patches
+      - name: Stage local customization registry
         run: |
-          PATCH_SOURCE_DIR="$RUNNER_TEMP/new-api-patches"
-          mkdir -p "$PATCH_SOURCE_DIR"
-          if [ -d patches ] && [ -n "$(ls patches/*.patch 2>/dev/null)" ]; then
-            cp patches/*.patch "$PATCH_SOURCE_DIR/"
-          fi
+          CUSTOMIZATION_SOURCE_DIR="$RUNNER_TEMP/new-api-customizations"
+          PATCH_SOURCE_DIR="$CUSTOMIZATION_SOURCE_DIR/patches"
+          mkdir -p "$PATCH_SOURCE_DIR" "$CUSTOMIZATION_SOURCE_DIR/docs"
+          find patches -maxdepth 1 -type f -name '*.patch' -exec cp {} "$PATCH_SOURCE_DIR/" \;
+          cp patches/README.md "$PATCH_SOURCE_DIR/README.md"
+          cp -R docs/customizations "$CUSTOMIZATION_SOURCE_DIR/docs/customizations"
+          echo "CUSTOMIZATION_SOURCE_DIR=$CUSTOMIZATION_SOURCE_DIR" >> "$GITHUB_ENV"
           echo "PATCH_SOURCE_DIR=$PATCH_SOURCE_DIR" >> $GITHUB_ENV
 
       - name: Create sync branch from upstream
@@ -143,14 +147,17 @@ jobs:
       - name: Commit patched changes
         if: steps.patches.outputs.has_patches == 'true'
         run: |
+          mkdir -p patches docs
+          cp -R "$PATCH_SOURCE_DIR/." patches/
+          cp -R "$CUSTOMIZATION_SOURCE_DIR/docs/customizations" docs/customizations
           git add -A
           # 如果有改动才提交
           if ! git diff --cached --quiet; then
             PATCH_LIST="$(for f in "$PATCH_SOURCE_DIR"/*.patch; do basename "$f"; done)"
             git commit -m "$(cat <<EOF
-          feat: re-apply custom patches after upstream sync
+          feat: 同步上游并重新应用本地定制
 
-          Patches applied:
+          已应用补丁：
           $PATCH_LIST
           EOF
           )"
@@ -158,35 +165,23 @@ jobs:
             echo "::notice::No changes after applying patches"
           fi
 
-      - name: Verify patch registry
-        if: inputs.dry_run == false
-        run: |
-          bash scripts/verify_patches.sh
-
       - name: Set up Go
         if: inputs.dry_run == false
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '>=1.25.1'
 
-      - name: Verify customizations
+      - name: Set up Bun
         if: inputs.dry_run == false
-        run: |
-          go mod download
-          echo "### Customization verification" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "go test ./controller -run '^TestTokenRedeem' -v" >> $GITHUB_STEP_SUMMARY
-          echo "go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          go test ./controller -run '^TestTokenRedeem' -v
-          go test ./service -run '^(TestRefundTaskQuota|TestCASGuarded)' -v
-          echo "### ✅ Customization verification passed" >> $GITHUB_STEP_SUMMARY
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
 
-      - name: Verify build
+      - name: Verify patch replay and customizations
         if: inputs.dry_run == false
         run: |
-          go build ./...
-          echo "### ✅ Build verification passed" >> $GITHUB_STEP_SUMMARY
+          PATCH_BASE_REF="$UPSTREAM_SHA" bash scripts/verify_patches.sh
+          echo "### Patch replay and customization verification passed" >> $GITHUB_STEP_SUMMARY
 
       - name: Push branch & create PR
         if: inputs.dry_run == false

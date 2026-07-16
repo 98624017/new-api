@@ -1,20 +1,20 @@
 diff --git a/controller/relay.go b/controller/relay.go
-index c97ab45b4..950780f1a 100644
+index 6e91ccb60..01115f6fc 100644
 --- a/controller/relay.go
 +++ b/controller/relay.go
-@@ -574,6 +574,7 @@ func RelayTask(c *gin.Context) {
+@@ -582,6 +582,7 @@ func RelayTask(c *gin.Context) {
  		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
  		task.PrivateData.BillingSource = relayInfo.BillingSource
  		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 +		task.TokenId = relayInfo.TokenId
  		task.PrivateData.TokenId = relayInfo.TokenId
+ 		task.PrivateData.NodeName = common.NodeName
  		task.PrivateData.BillingContext = &model.TaskBillingContext{
- 			ModelPrice:      relayInfo.PriceData.ModelPrice,
 diff --git a/controller/task.go b/controller/task.go
-index eac7db153..6b91f701b 100644
+index a80f1a687..397087fe1 100644
 --- a/controller/task.go
 +++ b/controller/task.go
-@@ -66,6 +66,31 @@ func GetUserTask(c *gin.Context) {
+@@ -60,6 +60,31 @@ func GetUserTask(c *gin.Context) {
  	common.ApiSuccess(c, pageInfo)
  }
  
@@ -202,32 +202,74 @@ index 000000000..9733a46d3
 +	assert.Equal(t, string(model.TaskStatusSuccess), page.Items[0].Status)
 +}
 diff --git a/controller/token_test.go b/controller/token_test.go
-index 3eea67305..8937655ee 100644
+index 12b1cbdd8..55bec729b 100644
 --- a/controller/token_test.go
 +++ b/controller/token_test.go
-@@ -52,6 +52,8 @@ func setupTokenControllerTestDB(t *testing.T) *gorm.DB {
- 	if err != nil {
- 		t.Fatalf("failed to open sqlite db: %v", err)
- 	}
+@@ -75,6 +75,10 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
+ 	t.Helper()
+ 
+ 	gin.SetMode(gin.TestMode)
 +	previousDB := model.DB
 +	previousLogDB := model.LOG_DB
- 	model.DB = db
- 	model.LOG_DB = db
++	previousMainDatabaseType := common.MainDatabaseType()
++	previousLogDatabaseType := common.LogDatabaseType()
+ 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+ 	common.RedisEnabled = false
  
-@@ -60,6 +62,8 @@ func setupTokenControllerTestDB(t *testing.T) *gorm.DB {
- 	}
+@@ -87,6 +91,9 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
+ 	model.LOG_DB = db
  
  	t.Cleanup(func() {
 +		model.DB = previousDB
 +		model.LOG_DB = previousLogDB
++		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
  		sqlDB, err := db.DB()
  		if err == nil {
  			_ = sqlDB.Close()
+@@ -117,6 +124,10 @@ func openTokenControllerExternalDB(t *testing.T, dialect string, dsn string) (*g
+ 
+ 	gin.SetMode(gin.TestMode)
+ 	common.RedisEnabled = false
++	previousDB := model.DB
++	previousLogDB := model.LOG_DB
++	previousMainDatabaseType := common.MainDatabaseType()
++	previousLogDatabaseType := common.LogDatabaseType()
+ 
+ 	var (
+ 		db     *gorm.DB
+@@ -141,13 +152,12 @@ func openTokenControllerExternalDB(t *testing.T, dialect string, dsn string) (*g
+ 	model.DB = db
+ 	model.LOG_DB = db
+ 
+-	if db.Migrator().HasTable("tokens") {
+-		t.Skipf("refusing to run %s migration compatibility test against external database because tokens table already exists", dialect)
+-	}
+-
+ 	managedTokensTable := new(bool)
+ 
+ 	t.Cleanup(func() {
++		model.DB = previousDB
++		model.LOG_DB = previousLogDB
++		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
+ 		if *managedTokensTable && db.Migrator().HasTable("tokens") {
+ 			_ = db.Migrator().DropTable("tokens")
+ 		}
+@@ -157,6 +167,10 @@ func openTokenControllerExternalDB(t *testing.T, dialect string, dsn string) (*g
+ 		}
+ 	})
+ 
++	if db.Migrator().HasTable("tokens") {
++		t.Skipf("refusing to run %s migration compatibility test against external database because tokens table already exists", dialect)
++	}
++
+ 	return db, managedTokensTable
+ }
+ 
 diff --git a/controller/user.go b/controller/user.go
-index a12d5c662..944b42791 100644
+index 3e5293be1..289b757f0 100644
 --- a/controller/user.go
 +++ b/controller/user.go
-@@ -1087,6 +1087,42 @@ func TopUp(c *gin.Context) {
+@@ -1323,6 +1323,42 @@ func TopUp(c *gin.Context) {
  	})
  }
  
@@ -272,7 +314,7 @@ index a12d5c662..944b42791 100644
  	QuotaWarningThreshold            float64 `json:"quota_warning_threshold"`
 diff --git a/controller/user_token_redeem_test.go b/controller/user_token_redeem_test.go
 new file mode 100644
-index 000000000..b7441ab21
+index 000000000..fa9b57709
 --- /dev/null
 +++ b/controller/user_token_redeem_test.go
 @@ -0,0 +1,259 @@
@@ -300,7 +342,7 @@ index 000000000..b7441ab21
 +func TestMain(m *testing.M) {
 +	gin.SetMode(gin.TestMode)
 +
-+	common.UsingSQLite = true
++	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 +	common.RedisEnabled = false
 +	common.BatchUpdateEnabled = false
 +	common.LogConsumeEnabled = true
@@ -536,7 +578,7 @@ index 000000000..b7441ab21
 +	assert.Equal(t, initQuota, getUserQuotaForTest(t, userID))
 +}
 diff --git a/model/redemption.go b/model/redemption.go
-index b0ccb5df1..cc5e55288 100644
+index 23985ef47..91b254c20 100644
 --- a/model/redemption.go
 +++ b/model/redemption.go
 @@ -7,6 +7,7 @@ import (
@@ -547,7 +589,7 @@ index b0ccb5df1..cc5e55288 100644
  
  	"gorm.io/gorm"
  )
-@@ -112,7 +113,11 @@ func GetRedemptionById(id int) (*Redemption, error) {
+@@ -134,7 +135,11 @@ func GetRedemptionById(id int) (*Redemption, error) {
  	return &redemption, err
  }
  
@@ -560,28 +602,31 @@ index b0ccb5df1..cc5e55288 100644
  	if key == "" {
  		return 0, errors.New("未提供兑换码")
  	}
-@@ -120,6 +125,7 @@ func Redeem(key string, userId int) (quota int, err error) {
+@@ -142,6 +147,7 @@ func Redeem(key string, userId int) (quota int, err error) {
  		return 0, errors.New("无效的 user id")
  	}
  	redemption := &Redemption{}
 +	logContent := ""
  
  	keyCol := "`key`"
- 	if common.UsingPostgreSQL {
-@@ -141,6 +147,12 @@ func Redeem(key string, userId int) (quota int, err error) {
- 		if err != nil {
- 			return err
+ 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+@@ -175,16 +181,73 @@ func Redeem(key string, userId int) (quota int, err error) {
+ 		if result.RowsAffected == 0 {
+ 			return errors.New("该兑换码已被使用")
  		}
+-		return tx.Model(&User{}).Where("id = ?", userId).Update("quota", gorm.Expr("quota + ?", redemption.Quota)).Error
++		if err := tx.Model(&User{}).Where("id = ?", userId).Update("quota", gorm.Expr("quota + ?", redemption.Quota)).Error; err != nil {
++			return err
++		}
 +		if apply != nil {
 +			logContent, err = apply(tx, redemption)
 +			if err != nil {
 +				return err
 +			}
 +		}
- 		redemption.RedeemedTime = common.GetTimestamp()
- 		redemption.Status = common.RedemptionCodeStatusUsed
- 		redemption.UsedUserId = userId
-@@ -151,10 +163,58 @@ func Redeem(key string, userId int) (quota int, err error) {
++		return nil
+ 	})
+ 	if err != nil {
  		common.SysError("redemption failed: " + err.Error())
  		return 0, ErrRedeemFailed
  	}
@@ -642,7 +687,7 @@ index b0ccb5df1..cc5e55288 100644
  	var err error
  	err = DB.Create(redemption).Error
 diff --git a/model/task.go b/model/task.go
-index 2fbd3fd66..28547a5fe 100644
+index cf936ed1f..8b3c5adb0 100644
 --- a/model/task.go
 +++ b/model/task.go
 @@ -10,6 +10,7 @@ import (
@@ -663,7 +708,7 @@ index 2fbd3fd66..28547a5fe 100644
  	ChannelId  int                   `json:"channel_id" gorm:"index"`
  	Quota      int                   `json:"quota"`
  	Action     string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
-@@ -213,27 +215,7 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
+@@ -214,27 +216,7 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
  	var err error
  
  	// 初始化查询构建器
@@ -692,7 +737,7 @@ index 2fbd3fd66..28547a5fe 100644
  
  	// 获取数据
  	err = query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
-@@ -249,36 +231,7 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
+@@ -250,36 +232,7 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
  	var err error
  
  	// 初始化查询构建器
@@ -730,7 +775,7 @@ index 2fbd3fd66..28547a5fe 100644
  
  	// 获取数据
  	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
-@@ -438,7 +391,36 @@ type TaskQuotaUsage struct {
+@@ -469,7 +422,36 @@ type TaskQuotaUsage struct {
  // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
  func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
  	var total int64
@@ -768,7 +813,7 @@ index 2fbd3fd66..28547a5fe 100644
  	if queryParams.ChannelID != "" {
  		query = query.Where("channel_id = ?", queryParams.ChannelID)
  	}
-@@ -466,34 +448,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
+@@ -497,34 +479,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
  	if queryParams.EndTimestamp != 0 {
  		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
  	}
@@ -805,10 +850,10 @@ index 2fbd3fd66..28547a5fe 100644
  func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
  	openAIVideo := dto.NewOpenAIVideo()
 diff --git a/router/api-router.go b/router/api-router.go
-index acc2241b5..3a4b35461 100644
+index 83f9259b2..24868cf50 100644
 --- a/router/api-router.go
 +++ b/router/api-router.go
-@@ -270,6 +270,9 @@ func SetApiRouter(router *gin.Engine) {
+@@ -253,6 +253,9 @@ func SetApiRouter(router *gin.Engine) {
  			}
  		}
  
@@ -818,7 +863,7 @@ index acc2241b5..3a4b35461 100644
  		redemptionRoute := apiRouter.Group("/redemption")
  		redemptionRoute.Use(middleware.AdminAuth())
  		{
-@@ -322,6 +325,7 @@ func SetApiRouter(router *gin.Engine) {
+@@ -325,6 +328,7 @@ func SetApiRouter(router *gin.Engine) {
  		taskRoute := apiRouter.Group("/task")
  		{
  			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)

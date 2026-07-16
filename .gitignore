@@ -8,6 +8,9 @@ upload
 build
 *.db-journal
 logs
+web/default/dist
+web/classic/dist
+web/node_modules
 web/dist
 .env
 one-api
@@ -19,9 +22,9 @@ tiktoken_cache
 .gocache
 .gomodcache/
 .cache
-web/bun.lock
 plans
 .claude
+.cursor
 
 electron/node_modules
 electron/dist
@@ -38,3 +41,12 @@ token_estimator_test.go
 meituapi/
 API-Reference 1.7.1.md
 docs/installation/nginx-upstream-failover.md
+.test
+skills-lock.json
+.playwright-mcp
+.playwright-cli/
+
+# Local-only live probes and scratch test workspaces.
+.local-tests/
+service/relayconvert/chat_responses_live_local_test.go
+service/openaicompat/chat_responses_live_local_test.go

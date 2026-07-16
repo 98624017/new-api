@@ -1,5 +1,7 @@
 # 008-seedance-asset-library-videos
 
+适配上游基线：`7c28993f6bd9e92616f3f578212577f8b7c40b45`。
+
 ## 1. 背景
 
 当前 Seedance 通过兼容 `/v1/videos` 的直连代理接入 NewAPI。Seedance2 上游新增真人形象 IP 资产库能力：下游传入真人图片 URL 后，上游异步处理并最终返回 `AssetId`，后续视频生成可使用该资产 ID。

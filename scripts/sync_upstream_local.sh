@@ -6,7 +6,6 @@ UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 TARGET_BRANCH="${TARGET_BRANCH:-$(git branch --show-current)}"
 PUSH_AFTER_SYNC="${PUSH_AFTER_SYNC:-0}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
-ALLOW_DIRTY_SPEC_WORKFLOW="${ALLOW_DIRTY_SPEC_WORKFLOW:-1}"
 
 usage() {
   cat <<'EOF'
@@ -19,7 +18,6 @@ usage() {
   TARGET_BRANCH=main              目标分支，默认当前分支
   PUSH_AFTER_SYNC=1               验证通过后自动 push
   SKIP_TESTS=1                    跳过回归测试
-  ALLOW_DIRTY_SPEC_WORKFLOW=0     不忽略 .spec-workflow/ 未跟踪目录
 
 推荐：
   make sync-upstream-local
@@ -35,18 +33,9 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-TMP_STATUS_FILE="$(mktemp)"
-trap 'rm -f "$TMP_STATUS_FILE"' EXIT
-
-git status --porcelain > "$TMP_STATUS_FILE"
-if [[ "$ALLOW_DIRTY_SPEC_WORKFLOW" == "1" ]]; then
-  grep -v '^\?\? \.spec-workflow/$' "$TMP_STATUS_FILE" > "${TMP_STATUS_FILE}.filtered" || true
-  mv "${TMP_STATUS_FILE}.filtered" "$TMP_STATUS_FILE"
-fi
-
-if [[ -s "$TMP_STATUS_FILE" ]]; then
+if [[ -n "$(git status --porcelain)" ]]; then
   echo "检测到未提交改动，先清理工作区后再同步："
-  cat "$TMP_STATUS_FILE"
+  git status --short
   exit 1
 fi
 
@@ -85,23 +74,10 @@ git branch "$BACKUP_BRANCH"
 echo "==> 合并上游分支: $MERGE_TARGET"
 git merge --no-edit "$MERGE_TARGET"
 
-mkdir -p /tmp/go-build-cache /tmp/go-tmp /tmp/gomodcache
-
-run_test() {
-  local cmd="$1"
-  echo "==> 运行: $cmd"
-  env GOCACHE=/tmp/go-build-cache \
-    GOTMPDIR=/tmp/go-tmp \
-    GOMODCACHE=/tmp/gomodcache \
-    timeout 60s bash -lc "$cmd"
-  echo
-}
-
 if [[ "$SKIP_TESTS" != "1" ]]; then
-  run_test "bash scripts/verify_patches.sh"
-  run_test "go test ./controller -run '^TestTokenRedeem' -v"
-  run_test "go test ./service -run '^(TestRefundTaskQuota_Wallet|TestRefundTaskQuota_Wallet_RestoreTokenEnabled|TestUpdateVideoTasks_FailureRefund)$' -v"
-  run_test "go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -v"
+  echo "==> 验证补丁重放、编译和全部本地定制"
+  bash scripts/verify_patches.sh
+  echo
 fi
 
 echo "==> 当前状态"

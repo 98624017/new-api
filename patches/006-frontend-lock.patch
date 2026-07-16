@@ -1,68 +1,37 @@
-diff --git a/docs/customizations/006-frontend-lock.md b/docs/customizations/006-frontend-lock.md
-new file mode 100644
-index 000000000..55141abfb
---- /dev/null
-+++ b/docs/customizations/006-frontend-lock.md
-@@ -0,0 +1,45 @@
-+# 006-frontend-lock
-+
-+## 目标
-+
-+增加一个可选的前端弱隐藏门禁。部署者设置 `FRONTEND_LOCK_PASSWORD` 后，浏览器访问 new-api 前端页面会先看到锁屏和公告；输入正确密码后，当前浏览器会缓存解锁状态并继续访问原前端。
-+
-+## 背景
-+
-+部分部署只希望对授权人员开放内部项目服务，不希望普通访客打开同一域名时直接看到 new-api 网页入口。完整安全隔离应通过 Cloudflare Access、反向代理路径限制、源站防火墙或后端鉴权实现。本补丁只提供轻量弱隐藏，降低普通访客误入概率。
-+
-+## 行为
-+
-+- `FRONTEND_LOCK_PASSWORD` 为空：前端不显示锁屏，行为与原项目一致。
-+- `FRONTEND_LOCK_PASSWORD` 非空：Go 服务启动时把密码注入到 `index.html` 的 `window.__FRONTEND_LOCK_PASSWORD__`。
-+- 前端加载后，如果当前浏览器尚未解锁、解锁缓存已过期，或解锁缓存对应的密码已变化，则显示锁屏页。
-+- 密码正确后写入 `localStorage`，解锁状态在当前浏览器缓存 2592000 秒（30 天），与后端用户登录 session cookie 的 `MaxAge` 保持一致。
-+- 后端服务请求路径不受影响，因为非浏览器客户端不会加载前端页面。
-+- 本地 Vite 开发可使用 `VITE_FRONTEND_LOCK_PASSWORD` 预览锁屏。
-+
-+## 风险
-+
-+这不是安全边界。密码会出现在浏览器可见的 HTML/JS 中，具备前端调试能力的人可以找到它。该功能只能防普通访客，不能替代：
-+
-+- Cloudflare Access
-+- 反向代理按域名/路径限制
-+- 源站防火墙
-+- 后端鉴权
-+
-+变更 `FRONTEND_LOCK_PASSWORD` 后需要重启服务。浏览器刷新拿到新注入密码后，旧解锁缓存会因密码指纹不匹配而失效，需要重新输入密码。
-+
-+## 涉及文件
-+
-+- `main.go`
-+- `main_test.go`
-+- `web/src/index.jsx`
-+- `web/src/components/common/FrontendLock.jsx`
-+- `web/src/helpers/frontendLock.js`
-+
-+## 验证
-+
-+```bash
-+go test . -run TestInjectFrontendLockPassword -count=1
-+cd web && bun run build
-+make verify-patches
-+```
+diff --git a/Dockerfile b/Dockerfile
+index e2788f55b..7e5c9b27c 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,6 +6,7 @@ COPY web/default/package.json ./default/package.json
+ COPY web/classic/package.json ./classic/package.json
+ RUN bun install --frozen-lockfile
+ COPY ./web/default ./default
++COPY ./web/shared ./shared
+ COPY ./VERSION /build/VERSION
+ RUN cd default && DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+ 
+@@ -17,6 +18,7 @@ COPY web/default/package.json ./default/package.json
+ COPY web/classic/package.json ./classic/package.json
+ RUN bun install --filter ./classic --frozen-lockfile
+ COPY ./web/classic ./classic
++COPY ./web/shared ./shared
+ COPY ./VERSION /build/VERSION
+ RUN cd classic && VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+ 
 diff --git a/main.go b/main.go
-index ac78a5814..1b6ecfda5 100644
+index 74c1f3aa9..ed0f74814 100644
 --- a/main.go
 +++ b/main.go
-@@ -182,6 +182,7 @@ func main() {
+@@ -202,6 +202,7 @@ func main() {
  
  	InjectUmamiAnalytics()
  	InjectGoogleAnalytics()
 +	InjectFrontendLockPassword()
  
  	// 设置路由
- 	router.SetRouter(server, buildFS, indexPage)
-@@ -240,6 +241,27 @@ func InjectGoogleAnalytics() {
- 	indexPage = bytes.ReplaceAll(indexPage, []byte("<!--Google Analytics-->\n"), []byte(analyticsInject))
+ 	router.SetRouter(server, router.ThemeAssets{
+@@ -294,6 +295,31 @@ func InjectGoogleAnalytics() {
+ 	classicIndexPage = bytes.ReplaceAll(classicIndexPage, placeholder, analyticsInject)
  }
  
 +func InjectFrontendLockPassword() {
@@ -77,13 +46,17 @@ index ac78a5814..1b6ecfda5 100644
 +		return
 +	}
 +
++	indexPage = injectFrontendLockPassword(indexPage, passwordJSON)
++	classicIndexPage = injectFrontendLockPassword(classicIndexPage, passwordJSON)
++}
++
++func injectFrontendLockPassword(page []byte, passwordJSON []byte) []byte {
 +	script := []byte("<script>window.__FRONTEND_LOCK_PASSWORD__=" + string(passwordJSON) + ";</script>\n")
 +	headEnd := []byte("</head>")
-+	if bytes.Contains(indexPage, headEnd) {
-+		indexPage = bytes.Replace(indexPage, headEnd, append(script, headEnd...), 1)
-+		return
++	if bytes.Contains(page, headEnd) {
++		return bytes.Replace(page, headEnd, append(script, headEnd...), 1)
 +	}
-+	indexPage = append(indexPage, script...)
++	return append(page, script...)
 +}
 +
  func InitResources() error {
@@ -91,10 +64,10 @@ index ac78a5814..1b6ecfda5 100644
  	// This is a placeholder function for future resource initialization
 diff --git a/main_test.go b/main_test.go
 new file mode 100644
-index 000000000..51391547f
+index 000000000..67e5ca083
 --- /dev/null
 +++ b/main_test.go
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,83 @@
 +package main
 +
 +import (
@@ -104,64 +77,162 @@ index 000000000..51391547f
 +
 +func TestInjectFrontendLockPasswordSkipsEmptyPassword(t *testing.T) {
 +	originalIndexPage := indexPage
++	originalClassicIndexPage := classicIndexPage
 +	defer func() {
 +		indexPage = originalIndexPage
++		classicIndexPage = originalClassicIndexPage
 +	}()
 +
 +	t.Setenv("FRONTEND_LOCK_PASSWORD", "")
 +	indexPage = []byte("<!doctype html><html><head></head><body></body></html>")
++	classicIndexPage = []byte("<!doctype html><html><head></head><body></body></html>")
 +
 +	InjectFrontendLockPassword()
 +
 +	if bytes.Contains(indexPage, []byte("__FRONTEND_LOCK_PASSWORD__")) {
 +		t.Fatalf("expected empty password to skip frontend lock injection, got %s", string(indexPage))
 +	}
++	if bytes.Contains(classicIndexPage, []byte("__FRONTEND_LOCK_PASSWORD__")) {
++		t.Fatalf("expected empty password to skip classic frontend lock injection, got %s", string(classicIndexPage))
++	}
 +}
 +
 +func TestInjectFrontendLockPasswordInjectsConfiguredPassword(t *testing.T) {
 +	originalIndexPage := indexPage
++	originalClassicIndexPage := classicIndexPage
 +	defer func() {
 +		indexPage = originalIndexPage
++		classicIndexPage = originalClassicIndexPage
 +	}()
 +
 +	t.Setenv("FRONTEND_LOCK_PASSWORD", "open-sesame")
 +	indexPage = []byte("<!doctype html><html><head><title>New API</title></head><body></body></html>")
++	classicIndexPage = []byte("<!doctype html><html><head><title>New API Classic</title></head><body></body></html>")
 +
 +	InjectFrontendLockPassword()
 +
 +	expected := []byte(`<script>window.__FRONTEND_LOCK_PASSWORD__="open-sesame";</script>`)
-+	if !bytes.Contains(indexPage, expected) {
-+		t.Fatalf("expected frontend lock password injection, got %s", string(indexPage))
-+	}
-+	if bytes.Index(indexPage, expected) > bytes.Index(indexPage, []byte("</head>")) {
-+		t.Fatalf("expected frontend lock script to be injected before </head>, got %s", string(indexPage))
++	for name, page := range map[string][]byte{
++		"default": indexPage,
++		"classic": classicIndexPage,
++	} {
++		if !bytes.Contains(page, expected) {
++			t.Fatalf("expected %s frontend lock password injection, got %s", name, string(page))
++		}
++		if bytes.Index(page, expected) > bytes.Index(page, []byte("</head>")) {
++			t.Fatalf("expected %s frontend lock script before </head>, got %s", name, string(page))
++		}
 +	}
 +}
 +
 +func TestInjectFrontendLockPasswordEscapesScriptBreakingCharacters(t *testing.T) {
 +	originalIndexPage := indexPage
++	originalClassicIndexPage := classicIndexPage
 +	defer func() {
 +		indexPage = originalIndexPage
++		classicIndexPage = originalClassicIndexPage
 +	}()
 +
 +	t.Setenv("FRONTEND_LOCK_PASSWORD", `x"</script><script>alert(1)</script>`)
 +	indexPage = []byte("<!doctype html><html><head></head><body></body></html>")
++	classicIndexPage = []byte("<!doctype html><html><head></head><body></body></html>")
 +
 +	InjectFrontendLockPassword()
 +
-+	if bytes.Contains(indexPage, []byte(`"</script><script>`)) {
-+		t.Fatalf("expected injected password to escape script-breaking content, got %s", string(indexPage))
-+	}
-+	if !bytes.Contains(indexPage, []byte(`\u003c/script\u003e\u003cscript\u003e`)) {
-+		t.Fatalf("expected HTML-sensitive characters to be JSON escaped, got %s", string(indexPage))
++	for name, page := range map[string][]byte{
++		"default": indexPage,
++		"classic": classicIndexPage,
++	} {
++		if bytes.Contains(page, []byte(`"</script><script>`)) {
++			t.Fatalf("expected %s injected password to escape script-breaking content, got %s", name, string(page))
++		}
++		if !bytes.Contains(page, []byte(`\u003c/script\u003e\u003cscript\u003e`)) {
++			t.Fatalf("expected %s HTML-sensitive characters to be JSON escaped, got %s", name, string(page))
++		}
 +	}
 +}
-diff --git a/web/src/components/common/FrontendLock.jsx b/web/src/components/common/FrontendLock.jsx
+diff --git a/web/classic/rsbuild.config.ts b/web/classic/rsbuild.config.ts
+index 3ccf1e96d..cab09df04 100644
+--- a/web/classic/rsbuild.config.ts
++++ b/web/classic/rsbuild.config.ts
+@@ -1,32 +1,34 @@
+-import path from 'path'
+-import { createRequire } from 'module'
+-import { fileURLToPath } from 'url'
+-import { defineConfig, loadEnv } from '@rsbuild/core'
+-import { pluginReact } from '@rsbuild/plugin-react'
++import path from 'path';
++import { createRequire } from 'module';
++import { fileURLToPath } from 'url';
++import { defineConfig, loadEnv } from '@rsbuild/core';
++import { pluginReact } from '@rsbuild/plugin-react';
+ 
+-const __dirname = path.dirname(fileURLToPath(import.meta.url))
+-const require = createRequire(import.meta.url)
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const require = createRequire(import.meta.url);
+ const semiUiDir = path.resolve(
+   path.dirname(require.resolve('@douyinfe/semi-ui')),
+   '../..',
+-)
++);
+ 
+ export default defineConfig(({ envMode }) => {
+-  const env = loadEnv({ mode: envMode, prefixes: ['VITE_'] })
++  const env = loadEnv({ mode: envMode, prefixes: ['VITE_'] });
+   const clientServerUrl =
+     process.env.VITE_REACT_APP_SERVER_URL ||
+     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
+-    ''
+-  const proxyServerUrl =
+-    clientServerUrl ||
+-    'http://localhost:3000'
+-  const isProd = envMode === 'production'
++    '';
++  const frontendLockPassword =
++    process.env.VITE_FRONTEND_LOCK_PASSWORD ||
++    env.rawPublicVars.VITE_FRONTEND_LOCK_PASSWORD ||
++    '';
++  const proxyServerUrl = clientServerUrl || 'http://localhost:3000';
++  const isProd = envMode === 'production';
+   const devProxy = Object.fromEntries(
+     (['/api', '/mj', '/pg'] as const).map((key) => [
+       key,
+       { target: proxyServerUrl, changeOrigin: true },
+     ]),
+-  ) as Record<string, { target: string; changeOrigin: boolean }>
++  ) as Record<string, { target: string; changeOrigin: boolean }>;
+ 
+   return {
+     plugins: [pluginReact()],
+@@ -35,9 +37,10 @@ export default defineConfig(({ envMode }) => {
+         index: './src/index.jsx',
+       },
+       define: {
+-        'import.meta.env.VITE_REACT_APP_SERVER_URL': JSON.stringify(
+-          clientServerUrl,
+-        ),
++        'import.meta.env.VITE_REACT_APP_SERVER_URL':
++          JSON.stringify(clientServerUrl),
++        'import.meta.env.VITE_FRONTEND_LOCK_PASSWORD':
++          JSON.stringify(frontendLockPassword),
+       },
+     },
+     resolve: {
+@@ -102,5 +105,5 @@ export default defineConfig(({ envMode }) => {
+         },
+       },
+     },
+-  }
+-})
++  };
++});
+diff --git a/web/classic/src/components/common/FrontendLock.jsx b/web/classic/src/components/common/FrontendLock.jsx
 new file mode 100644
-index 000000000..b56e034bd
+index 000000000..47c1127f7
 --- /dev/null
-+++ b/web/src/components/common/FrontendLock.jsx
-@@ -0,0 +1,197 @@
++++ b/web/classic/src/components/common/FrontendLock.jsx
+@@ -0,0 +1,201 @@
 +/*
 +Copyright (C) 2025 QuantumNous
 +
@@ -185,6 +256,7 @@ index 000000000..b56e034bd
 +import { Button, Empty, Input, Timeline, Typography } from '@douyinfe/semi-ui';
 +import { LockKeyhole, Megaphone } from 'lucide-react';
 +import { marked } from 'marked';
++import { useTranslation } from 'react-i18next';
 +import { API } from '../../helpers';
 +import {
 +  unlockFrontendSession,
@@ -194,6 +266,7 @@ index 000000000..b56e034bd
 +const { Text, Title } = Typography;
 +
 +const FrontendLock = ({ onUnlock }) => {
++  const { t } = useTranslation();
 +  const [password, setPassword] = useState('');
 +  const [error, setError] = useState('');
 +  const [noticeHtml, setNoticeHtml] = useState('');
@@ -259,7 +332,7 @@ index 000000000..b56e034bd
 +  const handleSubmit = (event) => {
 +    event.preventDefault();
 +    if (!verifyFrontendLockPassword(password)) {
-+      setError('密码不正确');
++      setError(t('密码不正确'));
 +      return;
 +    }
 +
@@ -278,10 +351,12 @@ index 000000000..b56e034bd
 +            </div>
 +            <div className='space-y-3'>
 +              <Title heading={2} className='!m-0'>
-+                访问已锁定
++                {t('访问已锁定')}
 +              </Title>
 +              <Text type='tertiary'>
-+                请输入访问密码继续访问内部项目服务。本服务不对外提供访问。
++                {t(
++                  '请输入访问密码继续访问内部项目服务。本服务不对外提供访问。',
++                )}
 +              </Text>
 +            </div>
 +
@@ -290,7 +365,7 @@ index 000000000..b56e034bd
 +                type='password'
 +                value={password}
 +                onChange={setPassword}
-+                placeholder='输入访问密码'
++                placeholder={t('输入访问密码')}
 +                size='large'
 +                autoFocus
 +              />
@@ -302,7 +377,7 @@ index 000000000..b56e034bd
 +                size='large'
 +                block
 +              >
-+                解锁访问
++                {t('解锁访问')}
 +              </Button>
 +            </form>
 +          </div>
@@ -312,20 +387,20 @@ index 000000000..b56e034bd
 +              <div className='flex items-center gap-2'>
 +                <Megaphone size={18} />
 +                <Title heading={4} className='!m-0'>
-+                  站点公告
++                  {t('站点公告')}
 +                </Title>
 +              </div>
 +            </div>
 +
 +            {loadingNotice ? (
-+              <Empty description='公告加载中...' />
++              <Empty description={t('公告加载中...')} />
 +            ) : noticeHtml ? (
 +              <div
 +                className='notice-content-scroll max-h-72 overflow-y-auto pr-2 leading-7'
 +                dangerouslySetInnerHTML={{ __html: noticeHtml }}
 +              />
 +            ) : (
-+              <Empty description='暂无公告' />
++              <Empty description={t('暂无公告')} />
 +            )}
 +
 +            {processedAnnouncements.length > 0 && (
@@ -359,134 +434,81 @@ index 000000000..b56e034bd
 +};
 +
 +export default FrontendLock;
-diff --git a/web/src/helpers/frontendLock.js b/web/src/helpers/frontendLock.js
+diff --git a/web/classic/src/helpers/frontendLock.js b/web/classic/src/helpers/frontendLock.js
 new file mode 100644
-index 000000000..eb8c9e090
+index 000000000..8c3a574cd
 --- /dev/null
-+++ b/web/src/helpers/frontendLock.js
-@@ -0,0 +1,116 @@
-+const FRONTEND_LOCK_STORAGE_KEY = 'new_api_frontend_lock_unlocked';
-+const FRONTEND_LOCK_UNLOCK_TTL_MS = 2592000 * 1000;
++++ b/web/classic/src/helpers/frontendLock.js
+@@ -0,0 +1,51 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import {
++  getFrontendLockPassword as resolveFrontendLockPassword,
++  isFrontendLockEnabled as resolveFrontendLockEnabled,
++  isFrontendLockUnlocked as resolveFrontendLockUnlocked,
++  unlockFrontendSession as persistFrontendUnlock,
++  verifyFrontendLockPassword as compareFrontendLockPassword,
++} from '../../../shared/frontend-lock';
 +
 +export function getFrontendLockPassword() {
-+  if (
-+    typeof window !== 'undefined' &&
-+    typeof window.__FRONTEND_LOCK_PASSWORD__ === 'string'
-+  ) {
-+    return window.__FRONTEND_LOCK_PASSWORD__;
-+  }
-+  return import.meta.env.VITE_FRONTEND_LOCK_PASSWORD || '';
++  return resolveFrontendLockPassword(
++    typeof window !== 'undefined'
++      ? window.__FRONTEND_LOCK_PASSWORD__
++      : undefined,
++    import.meta.env.VITE_FRONTEND_LOCK_PASSWORD || '',
++  );
 +}
 +
 +export function isFrontendLockEnabled() {
-+  return getFrontendLockPassword().trim() !== '';
-+}
-+
-+function getFrontendLockStorage() {
-+  if (typeof window === 'undefined') {
-+    return null;
-+  }
-+
-+  try {
-+    return window.localStorage;
-+  } catch {
-+    return null;
-+  }
-+}
-+
-+function getFrontendLockPasswordFingerprint() {
-+  const password = getFrontendLockPassword();
-+  let hash = 2166136261;
-+
-+  for (let i = 0; i < password.length; i += 1) {
-+    hash ^= password.charCodeAt(i);
-+    hash = Math.imul(hash, 16777619);
-+  }
-+
-+  return `${password.length}:${(hash >>> 0).toString(16)}`;
-+}
-+
-+function clearFrontendLockCache(storage) {
-+  try {
-+    storage?.removeItem(FRONTEND_LOCK_STORAGE_KEY);
-+  } catch {
-+    // 忽略浏览器禁用 localStorage 的场景。
-+  }
++  return resolveFrontendLockEnabled(getFrontendLockPassword());
 +}
 +
 +export function isFrontendLockUnlocked() {
-+  if (!isFrontendLockEnabled()) {
-+    return true;
-+  }
-+
-+  const storage = getFrontendLockStorage();
-+  if (!storage) {
-+    return false;
-+  }
-+
-+  let rawCache = '';
-+  try {
-+    rawCache = storage.getItem(FRONTEND_LOCK_STORAGE_KEY);
-+  } catch {
-+    return false;
-+  }
-+
-+  if (!rawCache) {
-+    return false;
-+  }
-+
-+  let cache;
-+  try {
-+    cache = JSON.parse(rawCache);
-+  } catch {
-+    clearFrontendLockCache(storage);
-+    return false;
-+  }
-+
-+  if (
-+    !cache ||
-+    typeof cache.expiresAt !== 'number' ||
-+    cache.expiresAt <= Date.now() ||
-+    cache.passwordFingerprint !== getFrontendLockPasswordFingerprint()
-+  ) {
-+    clearFrontendLockCache(storage);
-+    return false;
-+  }
-+
-+  return true;
++  return resolveFrontendLockUnlocked(getFrontendLockPassword());
 +}
 +
 +export function unlockFrontendSession() {
-+  if (!isFrontendLockEnabled()) {
-+    return;
-+  }
-+
-+  const storage = getFrontendLockStorage();
-+  if (!storage) {
-+    return;
-+  }
-+
-+  try {
-+    storage.setItem(
-+      FRONTEND_LOCK_STORAGE_KEY,
-+      JSON.stringify({
-+        expiresAt: Date.now() + FRONTEND_LOCK_UNLOCK_TTL_MS,
-+        passwordFingerprint: getFrontendLockPasswordFingerprint(),
-+      }),
-+    );
-+  } catch {
-+    // 写入失败时下次加载重新要求输入密码。
-+  }
++  persistFrontendUnlock(getFrontendLockPassword());
 +}
 +
 +export function verifyFrontendLockPassword(input) {
-+  return input === getFrontendLockPassword();
++  return compareFrontendLockPassword(input, getFrontendLockPassword());
 +}
-diff --git a/web/src/index.jsx b/web/src/index.jsx
-index 5162b0cbd..17ace73e5 100644
---- a/web/src/index.jsx
-+++ b/web/src/index.jsx
-@@ -26,12 +26,17 @@ import 'react-toastify/dist/ReactToastify.css';
+diff --git a/web/classic/src/index.jsx b/web/classic/src/index.jsx
+index f24f0ec08..7dccd6186 100644
+--- a/web/classic/src/index.jsx
++++ b/web/classic/src/index.jsx
+@@ -1,3 +1 @@
+-import '@douyinfe/semi-ui/react19-adapter';
+-
+ /*
+@@ -19,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-
++
++import '@douyinfe/semi-ui/react19-adapter';
+ import React from 'react';
+ import ReactDOM from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+@@ -28,12 +27,17 @@ import 'react-toastify/dist/ReactToastify.css';
  import { StatusProvider } from './context/Status';
  import { ThemeProvider } from './context/Theme';
  import PageLayout from './components/layout/PageLayout';
@@ -504,7 +526,7 @@ index 5162b0cbd..17ace73e5 100644
  
  // 欢迎信息（二次开发者未经允许不准将此移除）
  // Welcome message (Do not remove this without permission from the original developer)
-@@ -52,6 +57,18 @@ function SemiLocaleWrapper({ children }) {
+@@ -54,6 +58,18 @@ function SemiLocaleWrapper({ children }) {
    return <LocaleProvider locale={semiLocale}>{children}</LocaleProvider>;
  }
  
@@ -523,7 +545,7 @@ index 5162b0cbd..17ace73e5 100644
  // initialization
  
  const root = ReactDOM.createRoot(document.getElementById('root'));
-@@ -67,7 +84,7 @@ root.render(
+@@ -69,7 +85,7 @@ root.render(
          >
            <ThemeProvider>
              <SemiLocaleWrapper>
@@ -532,3 +554,913 @@ index 5162b0cbd..17ace73e5 100644
              </SemiLocaleWrapper>
            </ThemeProvider>
          </BrowserRouter>
+diff --git a/web/default/rsbuild.config.ts b/web/default/rsbuild.config.ts
+index 3b9d11de6..fb83d4613 100644
+--- a/web/default/rsbuild.config.ts
++++ b/web/default/rsbuild.config.ts
+@@ -14,6 +14,10 @@ export default defineConfig(({ envMode }) => {
+     process.env.VITE_REACT_APP_SERVER_URL ||
+     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
+     'http://localhost:3000'
++  const frontendLockPassword =
++    process.env.VITE_FRONTEND_LOCK_PASSWORD ||
++    env.rawPublicVars.VITE_FRONTEND_LOCK_PASSWORD ||
++    ''
+ 
+   const isProd = envMode === 'production'
+   const devProxy = Object.fromEntries(
+@@ -56,6 +60,10 @@ export default defineConfig(({ envMode }) => {
+       entry: {
+         index: './src/main.tsx',
+       },
++      define: {
++        'import.meta.env.VITE_FRONTEND_LOCK_PASSWORD':
++          JSON.stringify(frontendLockPassword),
++      },
+     },
+     resolve: {
+       alias: {
+diff --git a/web/default/src/features/frontend-lock/frontend-lock-gate.tsx b/web/default/src/features/frontend-lock/frontend-lock-gate.tsx
+new file mode 100644
+index 000000000..20a8bfd7f
+--- /dev/null
++++ b/web/default/src/features/frontend-lock/frontend-lock-gate.tsx
+@@ -0,0 +1,290 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { ArrowRight, LockKeyhole, Megaphone } from 'lucide-react'
++import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { RichContent } from '@/components/rich-content'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { ScrollArea } from '@/components/ui/scroll-area'
++import { Separator } from '@/components/ui/separator'
++import { Skeleton } from '@/components/ui/skeleton'
++import { api } from '@/lib/api'
++import { getAnnouncementColorClass } from '@/lib/colors'
++import {
++  isFrontendLockEnabled,
++  isFrontendLockUnlocked,
++  unlockFrontendSession,
++  verifyFrontendLockPassword,
++} from '@/lib/frontend-lock'
++import { cn } from '@/lib/utils'
++
++interface FrontendLockGateProps {
++  children: ReactNode
++}
++
++interface AnnouncementItem {
++  id?: number | string
++  type?: string
++  content?: string
++  extra?: string
++  publishDate?: string
++}
++
++interface LockContent {
++  notice: string
++  announcements: AnnouncementItem[]
++}
++
++const emptyLockContent: LockContent = {
++  notice: '',
++  announcements: [],
++}
++
++function announcementKey(item: AnnouncementItem, index: number): string {
++  if (item.id !== undefined && item.id !== null) return `id:${item.id}`
++  return `${item.publishDate || 'announcement'}:${index}`
++}
++
++function LockAnnouncements(props: { content: LockContent; loading: boolean }) {
++  const { t } = useTranslation()
++
++  if (props.loading) {
++    return (
++      <div className='space-y-5' aria-label={t('Loading...')}>
++        <Skeleton className='h-5 w-2/3' />
++        <Skeleton className='h-24 w-full' />
++        <Skeleton className='h-16 w-full' />
++      </div>
++    )
++  }
++
++  if (!props.content.notice && props.content.announcements.length === 0) {
++    return (
++      <p className='text-muted-foreground border-border border-t py-6 text-sm'>
++        {t('No announcements at this time')}
++      </p>
++    )
++  }
++
++  return (
++    <ScrollArea className='max-h-[34rem] flex-1 pr-4 lg:max-h-[calc(100dvh-9rem)]'>
++      {props.content.notice ? (
++        <div className='pb-6 text-sm leading-7'>
++          <RichContent breaks content={props.content.notice} />
++        </div>
++      ) : null}
++
++      {props.content.notice && props.content.announcements.length > 0 ? (
++        <Separator />
++      ) : null}
++
++      {props.content.announcements.length > 0 ? (
++        <div className='divide-border divide-y'>
++          {props.content.announcements.map((item, index) => (
++            <article
++              key={announcementKey(item, index)}
++              className='flex gap-3 py-5'
++            >
++              <span
++                aria-hidden='true'
++                className={cn(
++                  'mt-2 size-2 shrink-0 rounded-full',
++                  getAnnouncementColorClass(item.type)
++                )}
++              />
++              <div className='min-w-0 flex-1 space-y-2 text-sm'>
++                <RichContent breaks content={item.content || ''} />
++                {item.extra ? (
++                  <RichContent
++                    breaks
++                    content={item.extra}
++                    className='text-muted-foreground text-xs'
++                  />
++                ) : null}
++                {item.publishDate ? (
++                  <time className='text-muted-foreground block text-xs'>
++                    {item.publishDate}
++                  </time>
++                ) : null}
++              </div>
++            </article>
++          ))}
++        </div>
++      ) : null}
++    </ScrollArea>
++  )
++}
++
++function FrontendLockScreen(props: { onUnlock: () => void }) {
++  const { t } = useTranslation()
++  const [password, setPassword] = useState('')
++  const [error, setError] = useState('')
++  const [content, setContent] = useState<LockContent>(emptyLockContent)
++  const [loading, setLoading] = useState(true)
++
++  useEffect(() => {
++    let active = true
++
++    void Promise.allSettled([
++      api.get('/api/notice', {
++        disableDuplicate: true,
++        skipBusinessError: true,
++        skipErrorHandler: true,
++      }),
++      api.get('/api/status', {
++        disableDuplicate: true,
++        skipBusinessError: true,
++        skipErrorHandler: true,
++      }),
++    ])
++      .then(([noticeResult, statusResult]) => {
++        if (!active) return
++
++        const notice =
++          noticeResult.status === 'fulfilled' &&
++          noticeResult.value.data?.success &&
++          typeof noticeResult.value.data.data === 'string'
++            ? noticeResult.value.data.data
++            : ''
++        const statusData =
++          statusResult.status === 'fulfilled' &&
++          statusResult.value.data?.success &&
++          statusResult.value.data.data &&
++          typeof statusResult.value.data.data === 'object'
++            ? (statusResult.value.data.data as Record<string, unknown>)
++            : null
++        const announcements = Array.isArray(statusData?.announcements)
++          ? (statusData.announcements as AnnouncementItem[]).slice(0, 5)
++          : []
++
++        setContent({ notice, announcements })
++        setLoading(false)
++      })
++      .catch(() => {
++        if (active) setLoading(false)
++      })
++
++    return () => {
++      active = false
++    }
++  }, [])
++
++  function handleSubmit(event: FormEvent<HTMLFormElement>): void {
++    event.preventDefault()
++    if (!verifyFrontendLockPassword(password)) {
++      setError(t('Incorrect password'))
++      return
++    }
++
++    unlockFrontendSession()
++    setError('')
++    props.onUnlock()
++  }
++
++  return (
++    <main className='bg-background text-foreground min-h-dvh'>
++      <div className='grid min-h-dvh lg:grid-cols-[minmax(24rem,0.82fr)_minmax(32rem,1.18fr)]'>
++        <section className='border-border flex min-h-[60dvh] items-center border-b px-5 py-12 sm:px-10 lg:min-h-dvh lg:border-r lg:border-b-0 lg:px-14'>
++          <div className='mx-auto w-full max-w-md lg:mx-0'>
++            <div className='border-border bg-muted/40 mb-8 flex size-11 items-center justify-center rounded-lg border'>
++              <LockKeyhole aria-hidden='true' className='size-5' />
++            </div>
++
++            <div className='mb-8 space-y-2'>
++              <h1 className='text-2xl font-semibold sm:text-3xl'>
++                {t('Access locked')}
++              </h1>
++              <p className='text-muted-foreground text-sm'>
++                {t('Enter password')}
++              </p>
++            </div>
++
++            <form className='space-y-4' onSubmit={handleSubmit}>
++              <div className='space-y-2'>
++                <Label htmlFor='frontend-lock-password'>{t('Password')}</Label>
++                <Input
++                  id='frontend-lock-password'
++                  type='password'
++                  value={password}
++                  onChange={(event) => {
++                    setPassword(event.target.value)
++                    if (error) setError('')
++                  }}
++                  autoComplete='current-password'
++                  autoFocus
++                  aria-invalid={Boolean(error)}
++                  aria-describedby={error ? 'frontend-lock-error' : undefined}
++                  className='h-10'
++                />
++                <p
++                  id='frontend-lock-error'
++                  aria-live='polite'
++                  className='text-destructive min-h-5 text-sm'
++                >
++                  {error}
++                </p>
++              </div>
++
++              <Button type='submit' size='lg' className='w-full'>
++                {t('Continue')}
++                <ArrowRight aria-hidden='true' data-icon='inline-end' />
++              </Button>
++            </form>
++          </div>
++        </section>
++
++        <section className='bg-muted/15 flex min-h-[40dvh] flex-col px-5 py-10 sm:px-10 lg:min-h-dvh lg:px-14 lg:py-12'>
++          <div className='mx-auto flex w-full max-w-2xl flex-1 flex-col'>
++            <header className='mb-6 flex items-center gap-3'>
++              <Megaphone
++                aria-hidden='true'
++                className='text-muted-foreground size-5'
++              />
++              <div>
++                <h2 className='text-base font-semibold'>
++                  {t('System Announcements')}
++                </h2>
++                <p className='text-muted-foreground text-xs'>
++                  {t('Latest platform updates and notices')}
++                </p>
++              </div>
++            </header>
++
++            <LockAnnouncements content={content} loading={loading} />
++          </div>
++        </section>
++      </div>
++    </main>
++  )
++}
++
++export function FrontendLockGate(props: FrontendLockGateProps) {
++  const [locked, setLocked] = useState(
++    () => isFrontendLockEnabled() && !isFrontendLockUnlocked()
++  )
++
++  if (locked) {
++    return <FrontendLockScreen onUnlock={() => setLocked(false)} />
++  }
++
++  return props.children
++}
+diff --git a/web/default/src/i18n/locales/en.json b/web/default/src/i18n/locales/en.json
+index 9eba821e3..decc56bed 100644
+--- a/web/default/src/i18n/locales/en.json
++++ b/web/default/src/i18n/locales/en.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.",
+     "Access Denied Message": "Access Denied Message",
+     "Access Forbidden": "Access Forbidden",
++    "Access locked": "Access locked",
+     "Access Policy (JSON)": "Access Policy (JSON)",
+     "Access previous conversations and start new ones.": "Access previous conversations and start new ones.",
+     "Access Token": "Access Token",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "Incoming path must not include query",
+     "Incoming path must start with /": "Incoming path must start with /",
+     "Incomplete": "Incomplete",
++    "Incorrect password": "Incorrect password",
+     "Increased user quota by {{quota}}": "Increased user quota by {{quota}}",
+     "Index": "Index",
+     "Initial quota given to new users": "Initial quota given to new users",
+diff --git a/web/default/src/i18n/locales/fr.json b/web/default/src/i18n/locales/fr.json
+index f4014a48f..feed05ea5 100644
+--- a/web/default/src/i18n/locales/fr.json
++++ b/web/default/src/i18n/locales/fr.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "Accédez à une vaste sélection de modèles via un protocole API standard et unifié. Propulsez les applications d'IA, gérez les actifs numériques et connectez le futur.",
+     "Access Denied Message": "Message d'accès refusé",
+     "Access Forbidden": "Accès interdit",
++    "Access locked": "Accès verrouillé",
+     "Access Policy (JSON)": "Politique d'accès (JSON)",
+     "Access previous conversations and start new ones.": "Accéder aux conversations précédentes et en démarrer de nouvelles.",
+     "Access Token": "Jeton d'accès",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "Le chemin entrant ne doit pas inclure de query",
+     "Incoming path must start with /": "Le chemin entrant doit commencer par /",
+     "Incomplete": "Incomplet",
++    "Incorrect password": "Mot de passe incorrect",
+     "Increased user quota by {{quota}}": "Quota de l'utilisateur augmenté de {{quota}}",
+     "Index": "Index",
+     "Initial quota given to new users": "Quota initial donné aux nouveaux utilisateurs",
+diff --git a/web/default/src/i18n/locales/ja.json b/web/default/src/i18n/locales/ja.json
+index 527f49b9f..a368664ab 100644
+--- a/web/default/src/i18n/locales/ja.json
++++ b/web/default/src/i18n/locales/ja.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "標準的で統一されたAPIプロトコルを介して、膨大なモデルにアクセス。AIアプリケーションを強化し、デジタル資産を管理し、未来へと繋げます。",
+     "Access Denied Message": "アクセス拒否メッセージ",
+     "Access Forbidden": "アクセス禁止",
++    "Access locked": "アクセスはロックされています",
+     "Access Policy (JSON)": "アクセスポリシー (JSON)",
+     "Access previous conversations and start new ones.": "以前の会話にアクセスし、新しい会話を開始します。",
+     "Access Token": "アクセストークン",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "受信パスに query を含めることはできません",
+     "Incoming path must start with /": "受信パスは / で始める必要があります",
+     "Incomplete": "未完了",
++    "Incorrect password": "パスワードが正しくありません",
+     "Increased user quota by {{quota}}": "ユーザーのクォータを {{quota}} 増やしました",
+     "Index": "インデックス",
+     "Initial quota given to new users": "新規ユーザーに付与される初期クォータ",
+diff --git a/web/default/src/i18n/locales/ru.json b/web/default/src/i18n/locales/ru.json
+index 0c424ad55..996e68399 100644
+--- a/web/default/src/i18n/locales/ru.json
++++ b/web/default/src/i18n/locales/ru.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "Получите доступ к огромному выбору моделей через стандартный, единый протокол API. Развивайте приложения ИИ, управляйте цифровыми активами и соединяйте будущее.",
+     "Access Denied Message": "Сообщение об отказе в доступе",
+     "Access Forbidden": "Доступ запрещен",
++    "Access locked": "Доступ заблокирован",
+     "Access Policy (JSON)": "Политика доступа (JSON)",
+     "Access previous conversations and start new ones.": "Доступ к предыдущим разговорам и начало новых.",
+     "Access Token": "Токен доступа",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "Входящий путь не должен содержать query",
+     "Incoming path must start with /": "Входящий путь должен начинаться с /",
+     "Incomplete": "Не завершено",
++    "Incorrect password": "Неверный пароль",
+     "Increased user quota by {{quota}}": "Квота пользователя увеличена на {{quota}}",
+     "Index": "Индекс",
+     "Initial quota given to new users": "Начальная квота, предоставляемая новым пользователям",
+diff --git a/web/default/src/i18n/locales/vi.json b/web/default/src/i18n/locales/vi.json
+index 17fc695a8..533d58290 100644
+--- a/web/default/src/i18n/locales/vi.json
++++ b/web/default/src/i18n/locales/vi.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "Truy cập số lượng lớn các mô hình thông qua giao thức API chuẩn hóa và thống nhất. Thúc đẩy các ứng dụng AI, quản lý tài sản kỹ thuật số và kết nối tương lai.",
+     "Access Denied Message": "Thông báo từ chối truy cập",
+     "Access Forbidden": "Truy cập bị cấm",
++    "Access locked": "Quyền truy cập đã bị khóa",
+     "Access Policy (JSON)": "Chính sách truy cập (JSON)",
+     "Access previous conversations and start new ones.": "Truy cập các cuộc trò chuyện trước đó và bắt đầu các cuộc trò chuyện mới.",
+     "Access Token": "Token truy cập",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "Path đầu vào không được chứa query",
+     "Incoming path must start with /": "Path đầu vào phải bắt đầu bằng /",
+     "Incomplete": "Chưa hoàn tất",
++    "Incorrect password": "Mật khẩu không chính xác",
+     "Increased user quota by {{quota}}": "Đã tăng hạn mức người dùng thêm {{quota}}",
+     "Index": "Chỉ mục",
+     "Initial quota given to new users": "Hạn mức ban đầu cấp cho người dùng mới",
+diff --git a/web/default/src/i18n/locales/zh-TW.json b/web/default/src/i18n/locales/zh-TW.json
+index 279e4e6e7..f90e2dd52 100644
+--- a/web/default/src/i18n/locales/zh-TW.json
++++ b/web/default/src/i18n/locales/zh-TW.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "透過統一、標準的介面協定接入海量模型。承載 AI 套用，高效管理數位資產，連接未來。",
+     "Access Denied Message": "存取被拒訊息",
+     "Access Forbidden": "禁止存取",
++    "Access locked": "存取已鎖定",
+     "Access Policy (JSON)": "存取政策 (JSON)",
+     "Access previous conversations and start new ones.": "存取之前的對話並開始新的對話。",
+     "Access Token": "存取令牌",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "入口路徑不能包含 query",
+     "Incoming path must start with /": "入口路徑必須以 / 開頭",
+     "Incomplete": "未完成",
++    "Incorrect password": "密碼不正確",
+     "Increased user quota by {{quota}}": "增加用戶額度 {{quota}}",
+     "Index": "索引",
+     "Initial quota given to new users": "授予新用戶的初始配額",
+diff --git a/web/default/src/i18n/locales/zh.json b/web/default/src/i18n/locales/zh.json
+index 45368da4d..a754561bd 100644
+--- a/web/default/src/i18n/locales/zh.json
++++ b/web/default/src/i18n/locales/zh.json
+@@ -126,6 +126,7 @@
+     "Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.": "通过统一、标准的接口协议接入海量模型。承载 AI 应用，高效管理数字资产，连接未来。",
+     "Access Denied Message": "访问被拒绝消息",
+     "Access Forbidden": "禁止访问",
++    "Access locked": "访问已锁定",
+     "Access Policy (JSON)": "访问策略 (JSON)",
+     "Access previous conversations and start new ones.": "访问之前的对话并开始新的对话。",
+     "Access Token": "访问令牌",
+@@ -2298,6 +2299,7 @@
+     "Incoming path must not include query": "入口路径不能包含 query",
+     "Incoming path must start with /": "入口路径必须以 / 开头",
+     "Incomplete": "未完成",
++    "Incorrect password": "密码不正确",
+     "Increased user quota by {{quota}}": "增加用户额度 {{quota}}",
+     "Index": "索引",
+     "Initial quota given to new users": "授予新用户的初始配额",
+diff --git a/web/default/src/lib/frontend-lock.ts b/web/default/src/lib/frontend-lock.ts
+new file mode 100644
+index 000000000..9970de988
+--- /dev/null
++++ b/web/default/src/lib/frontend-lock.ts
+@@ -0,0 +1,56 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import {
++  getFrontendLockPassword as resolveFrontendLockPassword,
++  isFrontendLockEnabled as resolveFrontendLockEnabled,
++  isFrontendLockUnlocked as resolveFrontendLockUnlocked,
++  unlockFrontendSession as persistFrontendUnlock,
++  verifyFrontendLockPassword as compareFrontendLockPassword,
++} from '../../../shared/frontend-lock'
++
++declare global {
++  interface Window {
++    __FRONTEND_LOCK_PASSWORD__?: string
++  }
++}
++
++export function getFrontendLockPassword(): string {
++  return resolveFrontendLockPassword(
++    typeof window !== 'undefined'
++      ? window.__FRONTEND_LOCK_PASSWORD__
++      : undefined,
++    import.meta.env.VITE_FRONTEND_LOCK_PASSWORD || ''
++  )
++}
++
++export function isFrontendLockEnabled(): boolean {
++  return resolveFrontendLockEnabled(getFrontendLockPassword())
++}
++
++export function isFrontendLockUnlocked(): boolean {
++  return resolveFrontendLockUnlocked(getFrontendLockPassword())
++}
++
++export function unlockFrontendSession(): void {
++  persistFrontendUnlock(getFrontendLockPassword())
++}
++
++export function verifyFrontendLockPassword(input: string): boolean {
++  return compareFrontendLockPassword(input, getFrontendLockPassword())
++}
+diff --git a/web/default/src/main.tsx b/web/default/src/main.tsx
+index caf9307c1..cb732ffd1 100644
+--- a/web/default/src/main.tsx
++++ b/web/default/src/main.tsx
+@@ -28,10 +28,11 @@ import { StrictMode } from 'react'
+ import ReactDOM from 'react-dom/client'
+ import { toast } from 'sonner'
+ 
++import { FrontendLockGate } from '@/features/frontend-lock/frontend-lock-gate'
+ import { getStatus } from '@/lib/api'
+ import { installBuildMetadata } from '@/lib/build-metadata'
+-import { applyFaviconToDom } from '@/lib/dom-utils'
+ import '@/lib/dayjs'
++import { applyFaviconToDom } from '@/lib/dom-utils'
+ import { initializeFrontendCache } from '@/lib/frontend-cache'
+ import { handleServerError } from '@/lib/handle-server-error'
+ import { useAuthStore } from '@/stores/auth-store'
+@@ -116,7 +117,10 @@ declare module '@tanstack/react-router' {
+ }
+ 
+ // Render the app
+-const rootElement = document.getElementById('root')!
++const rootElement = document.querySelector<HTMLElement>('#root')
++if (!rootElement) {
++  throw new Error('Missing #root element')
++}
+ // Set document.title and favicon from cached status, then refresh from network
+ ;(function initSystemBranding() {
+   try {
+@@ -167,7 +171,9 @@ if (!rootElement.innerHTML) {
+         <ThemeProvider>
+           <FontProvider>
+             <DirectionProvider>
+-              <RouterProvider router={router} />
++              <FrontendLockGate>
++                <RouterProvider router={router} />
++              </FrontendLockGate>
+             </DirectionProvider>
+           </FontProvider>
+         </ThemeProvider>
+diff --git a/web/shared/frontend-lock.test.ts b/web/shared/frontend-lock.test.ts
+new file mode 100644
+index 000000000..a1c3f1cb8
+--- /dev/null
++++ b/web/shared/frontend-lock.test.ts
+@@ -0,0 +1,72 @@
++import { describe, expect, test } from "bun:test";
++
++import {
++  FRONTEND_LOCK_STORAGE_KEY,
++  FRONTEND_LOCK_UNLOCK_TTL_MS,
++  getFrontendLockPassword,
++  isFrontendLockUnlocked,
++  unlockFrontendSession,
++  verifyFrontendLockPassword,
++  type FrontendLockStorage,
++} from "./frontend-lock";
++
++class MemoryStorage implements FrontendLockStorage {
++  private readonly values = new Map<string, string>();
++
++  getItem(key: string): string | null {
++    return this.values.get(key) ?? null;
++  }
++
++  setItem(key: string, value: string): void {
++    this.values.set(key, value);
++  }
++
++  removeItem(key: string): void {
++    this.values.delete(key);
++  }
++}
++
++describe("frontend lock state", () => {
++  test("prefers the injected password and allows an empty configuration", () => {
++    expect(getFrontendLockPassword("server-password", "dev-password")).toBe("server-password");
++    expect(getFrontendLockPassword(undefined, "dev-password")).toBe("dev-password");
++    expect(isFrontendLockUnlocked("", new MemoryStorage(), 100)).toBe(true);
++  });
++
++  test("persists a valid unlock for thirty days", () => {
++    const storage = new MemoryStorage();
++    unlockFrontendSession("secret", storage, 1_000);
++
++    expect(isFrontendLockUnlocked("secret", storage, 1_001)).toBe(true);
++    expect(isFrontendLockUnlocked("secret", storage, 1_000 + FRONTEND_LOCK_UNLOCK_TTL_MS)).toBe(
++      false,
++    );
++    expect(storage.getItem(FRONTEND_LOCK_STORAGE_KEY)).toBeNull();
++  });
++
++  test("invalidates the cache when the configured password changes", () => {
++    const storage = new MemoryStorage();
++    unlockFrontendSession("old-password", storage, 1_000);
++
++    expect(isFrontendLockUnlocked("new-password", storage, 1_001)).toBe(false);
++    expect(storage.getItem(FRONTEND_LOCK_STORAGE_KEY)).toBeNull();
++  });
++
++  test("continues without persistence when storage is unavailable", () => {
++    const storage: FrontendLockStorage = {
++      getItem: () => {
++        throw new Error("blocked");
++      },
++      setItem: () => {
++        throw new Error("blocked");
++      },
++      removeItem: () => {
++        throw new Error("blocked");
++      },
++    };
++
++    expect(() => unlockFrontendSession("secret", storage, 1_000)).not.toThrow();
++    expect(isFrontendLockUnlocked("secret", storage, 1_001)).toBe(false);
++    expect(verifyFrontendLockPassword("secret", "secret")).toBe(true);
++  });
++});
+diff --git a/web/shared/frontend-lock.ts b/web/shared/frontend-lock.ts
+new file mode 100644
+index 000000000..a82f69e60
+--- /dev/null
++++ b/web/shared/frontend-lock.ts
+@@ -0,0 +1,142 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++export const FRONTEND_LOCK_STORAGE_KEY = "new_api_frontend_lock_unlocked";
++export const FRONTEND_LOCK_UNLOCK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
++
++export interface FrontendLockStorage {
++  getItem(key: string): string | null;
++  setItem(key: string, value: string): void;
++  removeItem(key: string): void;
++}
++
++interface FrontendLockCache {
++  expiresAt: number;
++  passwordFingerprint: string;
++}
++
++export function getFrontendLockPassword(injectedPassword: unknown, fallbackPassword = ""): string {
++  return typeof injectedPassword === "string" ? injectedPassword : fallbackPassword;
++}
++
++export function isFrontendLockEnabled(password: string): boolean {
++  return password.trim() !== "";
++}
++
++export function getFrontendLockPasswordFingerprint(password: string): string {
++  let hash = 2166136261;
++
++  for (let index = 0; index < password.length; index += 1) {
++    hash ^= password.charCodeAt(index);
++    hash = Math.imul(hash, 16777619);
++  }
++
++  return `${password.length}:${(hash >>> 0).toString(16)}`;
++}
++
++export function getBrowserFrontendLockStorage(): FrontendLockStorage | null {
++  if (typeof window === "undefined") return null;
++
++  try {
++    return window.localStorage;
++  } catch {
++    return null;
++  }
++}
++
++function clearFrontendLockCache(storage: FrontendLockStorage | null): void {
++  try {
++    storage?.removeItem(FRONTEND_LOCK_STORAGE_KEY);
++  } catch {
++    // 浏览器禁用 localStorage 时，当前页面仍可临时解锁。
++  }
++}
++
++function parseFrontendLockCache(rawCache: string): FrontendLockCache | null {
++  try {
++    const cache: unknown = JSON.parse(rawCache);
++    if (!cache || typeof cache !== "object") return null;
++
++    const value = cache as Record<string, unknown>;
++    if (typeof value.expiresAt !== "number" || typeof value.passwordFingerprint !== "string") {
++      return null;
++    }
++
++    return {
++      expiresAt: value.expiresAt,
++      passwordFingerprint: value.passwordFingerprint,
++    };
++  } catch {
++    return null;
++  }
++}
++
++export function isFrontendLockUnlocked(
++  password: string,
++  storage = getBrowserFrontendLockStorage(),
++  now = Date.now(),
++): boolean {
++  if (!isFrontendLockEnabled(password)) return true;
++  if (!storage) return false;
++
++  let rawCache: string | null;
++  try {
++    rawCache = storage.getItem(FRONTEND_LOCK_STORAGE_KEY);
++  } catch {
++    return false;
++  }
++
++  if (!rawCache) return false;
++
++  const cache = parseFrontendLockCache(rawCache);
++  if (
++    !cache ||
++    cache.expiresAt <= now ||
++    cache.passwordFingerprint !== getFrontendLockPasswordFingerprint(password)
++  ) {
++    clearFrontendLockCache(storage);
++    return false;
++  }
++
++  return true;
++}
++
++export function unlockFrontendSession(
++  password: string,
++  storage = getBrowserFrontendLockStorage(),
++  now = Date.now(),
++): void {
++  if (!isFrontendLockEnabled(password) || !storage) return;
++
++  try {
++    storage.setItem(
++      FRONTEND_LOCK_STORAGE_KEY,
++      JSON.stringify({
++        expiresAt: now + FRONTEND_LOCK_UNLOCK_TTL_MS,
++        passwordFingerprint: getFrontendLockPasswordFingerprint(password),
++      }),
++    );
++  } catch {
++    // 写入失败时仅解锁当前 React 会话，下次刷新会再次要求密码。
++  }
++}
++
++export function verifyFrontendLockPassword(input: string, password: string): boolean {
++  return input === password;
++}
+diff --git a/web/default/src/lib/frontend-cache.ts b/web/default/src/lib/frontend-cache.ts
+index 00f129852..b8388e3c0 100644
+--- a/web/default/src/lib/frontend-cache.ts
++++ b/web/default/src/lib/frontend-cache.ts
+@@ -17,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-
++
++import { FRONTEND_LOCK_STORAGE_KEY } from '../../../shared/frontend-lock'
++
+ const FRONTEND_CACHE_VERSION = 'default-v1'
+ const FRONTEND_CACHE_VERSION_KEY = 'newapi:default:cache-version'
+ const PRESERVED_LOCAL_STORAGE_KEYS = new Set([
+@@ -25,6 +27,7 @@ const PRESERVED_LOCAL_STORAGE_KEYS = new Set([
+   'uid',
+   'aff',
+   'oauth:binding:result',
++  FRONTEND_LOCK_STORAGE_KEY,
+ ])
+-
++
+ export function initializeFrontendCache(): void {
+diff --git a/web/default/src/lib/frontend-cache.test.ts b/web/default/src/lib/frontend-cache.test.ts
+new file mode 100644
+index 000000000..4ee687ffe
+--- /dev/null
++++ b/web/default/src/lib/frontend-cache.test.ts
+@@ -0,0 +1,91 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import assert from 'node:assert/strict'
++import { afterEach, beforeEach, describe, test } from 'node:test'
++
++import { FRONTEND_LOCK_STORAGE_KEY } from '../../../shared/frontend-lock'
++import { initializeFrontendCache } from './frontend-cache'
++
++class MemoryLocalStorage implements Storage {
++  private readonly values = new Map<string, string>()
++
++  get length(): number {
++    return this.values.size
++  }
++
++  clear(): void {
++    this.values.clear()
++  }
++
++  getItem(key: string): string | null {
++    return this.values.get(key) ?? null
++  }
++
++  key(index: number): string | null {
++    return [...this.values.keys()][index] ?? null
++  }
++
++  removeItem(key: string): void {
++    this.values.delete(key)
++  }
++
++  setItem(key: string, value: string): void {
++    this.values.set(key, value)
++  }
++}
++
++const originalWindowDescriptor = Object.getOwnPropertyDescriptor(
++  globalThis,
++  'window'
++)
++
++describe('default frontend cache initialization', () => {
++  let storage: MemoryLocalStorage
++
++  beforeEach(() => {
++    storage = new MemoryLocalStorage()
++    Object.defineProperty(globalThis, 'window', {
++      configurable: true,
++      value: { localStorage: storage },
++    })
++  })
++
++  afterEach(() => {
++    if (originalWindowDescriptor) {
++      Object.defineProperty(globalThis, 'window', originalWindowDescriptor)
++      return
++    }
++    Reflect.deleteProperty(globalThis, 'window')
++  })
++
++  test('preserves the shared frontend lock while clearing stale UI cache', () => {
++    storage.setItem(FRONTEND_LOCK_STORAGE_KEY, 'classic-unlock-cache')
++    storage.setItem('legacy-ui-cache', 'stale')
++
++    initializeFrontendCache()
++
++    assert.equal(
++      storage.getItem(FRONTEND_LOCK_STORAGE_KEY),
++      'classic-unlock-cache'
++    )
++    assert.equal(storage.getItem('legacy-ui-cache'), null)
++    assert.equal(storage.getItem('newapi:default:cache-version'), 'default-v1')
++  })
++})

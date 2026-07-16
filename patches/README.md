@@ -23,7 +23,9 @@ make verify-patches
 
 - `patches/NNN-*.patch` 与 `docs/customizations/NNN-*.md` 是否一一对应
 - `patches/README.md` 与 `docs/customizations/README.md` 是否登记了对应二开
-- 所有 patch 是否能按编号顺序应用到当前项目锁定的原版 new-api 基准 `22e509c1efb2260e1537c78684f1a5e9f053b75a`
+- 所有 patch 是否能按编号顺序应用到当前项目锁定的原版 new-api 基准 `7c28993f6bd9e92616f3f578212577f8b7c40b45`
+- patch 所属文件在重放树中是否与当前集成树逐字一致
+- 重放树是否能完成前端干净安装、共享锁屏测试、default/classic 构建、Go 编译和 9 组定向回归
 - 当前工作区如果有源码改动，是否同步修改了至少一个 `patches/*.patch`
 
 ### 自动应用（推荐先尝试）
@@ -39,11 +41,13 @@ git apply --ignore-whitespace patches/001-api-key-self-service.patch
 git apply --3way patches/001-api-key-self-service.patch
 ```
 
-默认校验基准是 `22e509c1efb2260e1537c78684f1a5e9f053b75a`（`v0.12.11-1-g22e509c1e`）。如果需要验证新的上游基准，可显式设置：
+默认校验基准是 `7c28993f6bd9e92616f3f578212577f8b7c40b45`。如果需要验证新的上游基准，可显式设置：
 
 ```bash
 PATCH_BASE_REF=upstream/main make verify-patches
 ```
+
+覆盖基准只用于验证已经针对该提交重建的补丁，不能用来跳过补丁重建。
 
 ### 冲突时手动恢复
 
@@ -201,7 +205,7 @@ bash scripts/verify_task_refund_restore_token_quota.sh new-api:verify-20260406
 
 **背景**：预扣费失败、额度不足或部分上游错误文案可能带出具体金额 / 额度数值，例如 `用户剩余额度: ¥0.056700, 需要预扣费额度: ¥0.069900`。这些数值可能暴露本地成本价、预扣费策略或上游额度细节，不适合透传给下游客户。
 
-**涉及文件（7 个）**：
+**涉及文件（6 个）**：
 
 ### 1. `common/str.go`
 
@@ -269,16 +273,13 @@ go test ./service -run 'Test(TaskError.*MasksBillingAmounts|ResetStatusCode)' -c
 
 为 Worker 请求增加 context 版本，确保参考视频检测超时时 Worker 模式也能及时返回本地错误。
 
-### 7. `relay/channel/task/sora/adaptor_test.go`
-
-覆盖默认旧双倍计费、精确计费开启后多参考视频时长累加、Range 失败回退完整下载、解析失败拒绝请求、超时拒绝请求、不配置模型白名单不生效，以及环境变量显式 reload 后才生效。
-
 ### 回归验证
 
 ```bash
-go test ./relay/channel/task/sora
-go test ./relay/common
+make verify-patches
 ```
+
+Sora 适配器测试文件由后续共享该文件的 `007` 补丁首次创建，完整补丁链会统一验证 004/007/008/009。
 
 ---
 
@@ -288,7 +289,7 @@ go test ./relay/common
 
 **背景**：当前项目除了业务二开外，还需要保留一组用于同步上游、验证补丁和稳定构建的本地维护文件。该补丁用于确保“项目锁定的原版 new-api + patches” 能重放到当前现状。
 
-**涉及文件（13 个）**：
+**涉及文件（15 个）**：
 
 ### 1. `.github/workflows/docker-image-manual-ghcr.yml`
 
@@ -296,11 +297,13 @@ go test ./relay/common
 
 ### 2. `.github/workflows/sync-upstream.yml`
 
-保留上游同步 workflow。运行时先暂存当前分支的 `patches/*.patch`，再从 `upstream/<branch>` 创建同步分支并应用暂存补丁，避免在已打补丁分支上重复 apply。
+保留上游同步 workflow。运行时暂存 `patches/` 和 `docs/customizations/`，再从 `upstream/<branch>` 创建同步分支、应用补丁并恢复登记文件；随后安装 Go/Bun 并执行完整重放验证。
 
 ### 3. `.github/workflows/electron-build.yml`
 
 移除与当前部署链路无关的 Electron 桌面应用构建 workflow，避免误触发非 Docker 构建。
+
+目标上游的 `docker-build.yml` / `docker-image-branch.yml` 已覆盖 amd64、arm64 和分支镜像构建，因此不恢复旧的独立 alpha/arm64 workflow。
 
 ### 4. `.gitignore`
 
@@ -332,17 +335,20 @@ go test ./relay/common
 
 ### 11. `scripts/verify_patches.sh`
 
-二开补丁配对和可重放校验脚本。
+校验补丁配对、顺序应用、重放树一致性，并在临时重放树中执行前端干净安装、双前端构建、Go 编译和 9 组回归。每个编译或测试子命令最多运行 120 秒。
 
 ### 12. `tools/skills/newapi-upstream-sync/SKILL.md`
 
 本地上游同步 skill 说明。
 
+### 13. `web/classic/package.json` / `web/bun.lock`
+
+固定 classic 使用兼容的 `date-fns@2.30.0` 与 `date-fns-tz@1.3.8`，避免 Bun workspace 将旧版时区库错误解析到 default 使用的 `date-fns@4`。
+
 ### 回归验证
 
 ```bash
 make verify-patches
-go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -count=1
 ```
 
 ---
@@ -353,45 +359,39 @@ go test ./relay/common -run TestValidateBasicTaskRequest_MultipartWithMetadata -
 
 **背景**：内部服务域名有时会同时暴露前端入口。本补丁用于降低普通访客直接看到管理页面入口的概率，但不提供真正安全隔离。
 
-**涉及文件（8 个）**：
+**涉及文件（20 个）**：
 
 ### 1. `main.go`
 
-新增 `InjectFrontendLockPassword`，在服务启动时读取 `FRONTEND_LOCK_PASSWORD` 并注入 `window.__FRONTEND_LOCK_PASSWORD__`。
+新增双前端注入逻辑，在服务启动时读取 `FRONTEND_LOCK_PASSWORD` 并分别注入 default/classic 的 `window.__FRONTEND_LOCK_PASSWORD__`。
 
 ### 2. `main_test.go`
 
 覆盖空密码跳过注入、正常密码注入，以及 `</script>` 等字符被 JSON 安全转义。
 
-### 3. `web/src/index.jsx`
+### 3. `web/shared/frontend-lock.ts` / `web/shared/frontend-lock.test.ts`
 
-在根渲染处增加 `FrontendLockGate`，锁定时渲染锁屏，解锁后恢复原 `PageLayout`。
+共享存储 key、30 天 TTL、密码指纹、校验逻辑和 localStorage 异常降级，并用 Bun 测试覆盖。
 
-### 4. `web/src/helpers/frontendLock.js`
+### 4. `web/default/**`
 
-封装密码读取、开关判断、浏览器解锁缓存和密码校验逻辑。
+在 default 根渲染接入原生风格锁屏、公告加载、i18n 文案和开发环境密码注入。
 
-### 5. `web/src/components/common/FrontendLock.jsx`
+### 5. `web/classic/**`
 
-新增锁屏 UI，展示公告并提供密码输入。
+在 classic 根渲染接入 Semi UI 锁屏，并复用共享状态逻辑。
 
-### 6. `docs/customizations/006-frontend-lock.md`
+### 6. `Dockerfile`
 
-记录二开背景、行为、风险和验证命令。
-
-### 7. `docs/customizations/README.md`
-
-登记 006 二开。
-
-### 8. `patches/README.md`
-
-登记 006 补丁。
+在 Docker 前端构建阶段复制 `web/shared`，保证两套 Rsbuild 均能解析共享模块。
 
 ### 回归验证
 
 ```bash
 go test . -run TestInjectFrontendLockPassword -count=1
-(cd web && bun run build)
+bun test web/shared/frontend-lock.test.ts
+bun run --cwd web/default build:check
+bun run --cwd web/classic build
 make verify-patches
 ```
 
@@ -403,31 +403,15 @@ make verify-patches
 
 **背景**：Seedance 在当前部署中复用 NewAPI 的 Sora/OpenAI 视频任务机制，上游兼容 `/v1/videos`。下游可通过 `files`、`input_video`、`video_url`、`reference_video` 等顶层字段携带参考视频，这类请求需要与普通文生视频区分计费。
 
-**涉及文件（6 个）**：
+**涉及文件（2 个）**：
 
-### 1. `relay/channel/task/sora/constants.go`
-
-继续使用 `SORA_REFERENCE_VIDEO_DOUBLE_PRICE_MODELS` 作为统一白名单；Seedance 模型名也配置在该变量中。默认白名单为空。
-
-### 2. `relay/channel/task/sora/adaptor.go`
+### 1. `relay/channel/task/sora/adaptor.go`
 
 在 `EstimateBilling` 中识别 OpenAI Videos 顶层参考视频字段，命中白名单模型后返回 `video_input: 2`；保留原有 `content[].video_url` 视频输入计费路径。
 
-### 3. `relay/channel/task/sora/adaptor_test.go`
+### 2. `relay/channel/task/sora/adaptor_test.go`
 
 覆盖 Seedance 白名单模型顶层参考视频双倍计费、图片/音频不触发、未配置白名单不触发、Seedance 白名单加载，以及 Sora JSON 请求体字段透传。
-
-### 4. `docs/customizations/007-seedance-reference-video-double-price.md`
-
-记录二开背景、业务规则、风险和验证命令。
-
-### 5. `docs/customizations/README.md`
-
-登记 007 二开。
-
-### 6. `patches/README.md`
-
-登记 007 补丁。
 
 ### 回归验证
 
@@ -444,7 +428,7 @@ make verify-patches
 
 **背景**：Seedance2 上游提供真人形象 IP 资产库 API。当前部署希望继续使用 NewAPI 的 OpenAI Videos 任务机制、API Key 鉴权、任务入库、轮询、计费和用户隔离能力，不新增下游资产专用端点。
 
-**涉及文件（11 个）**：
+**涉及文件（8 个）**：
 
 ### 1. `relay/channel/task/sora/adaptor.go`
 
@@ -499,18 +483,6 @@ make verify-patches
 ### 8. `controller/user_token_redeem_test.go`
 
 测试清理逻辑同步清空任务和渠道表，避免 controller 测试之间污染全局测试数据库。
-
-### 9. `docs/customizations/008-seedance-asset-library-videos.md`
-
-记录二开背景、业务规则、风险和验证命令。
-
-### 10. `docs/customizations/README.md`
-
-登记 008 二开。
-
-### 11. `patches/README.md`
-
-登记 008 补丁。
 
 ### 回归验证
 
