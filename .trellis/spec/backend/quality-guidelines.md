@@ -91,6 +91,68 @@ if IsAllowlisted(modelName) && hasReferenceVideo {
 
 ---
 
+### Scenario: Legacy Task Result URL Classification In Frontend Views
+
+#### 1. Scope / Trigger
+
+- Trigger: a frontend view consumes `dto.TaskDto.status`, `fail_reason`, or `result_url` to render task results or failure states.
+- Applies to task logs, task detail dialogs, result links, and any destructive/error styling derived from these fields.
+
+#### 2. Signatures
+
+- Backend compatibility source: `func (t *model.Task) GetResultURL() string`.
+- DTO projection: `func relay.TaskModel2Dto(task *model.Task) *dto.TaskDto`.
+- Default frontend classifier: `getTaskFailureReason(status: string, failReason?: string, resultUrl?: string): string`.
+
+#### 3. Contracts
+
+- New tasks store their result URL in `Task.PrivateData.ResultURL`; legacy tasks may store a successful video URL in `Task.FailReason`.
+- `TaskModel2Dto` uses `GetResultURL()`, so a legacy successful task can legitimately return the same non-empty value in both `fail_reason` and `result_url`.
+- When `status === SUCCESS` and the trimmed values are equal, frontend views must treat the value as a result URL: hide the failure section and do not apply failure styling.
+- Failed tasks must keep displaying `fail_reason`, even if it equals `result_url`; successful tasks with distinct non-empty values must also preserve the distinct failure/warning text.
+- Result links and video proxy behavior remain available when the duplicate legacy failure value is hidden.
+
+#### 4. Validation & Error Matrix
+
+- `SUCCESS` + equal non-empty trimmed values -> no visible failure reason and no destructive detail-entry style.
+- `SUCCESS` + distinct non-empty values -> show `fail_reason`; keep `result_url` as a result.
+- `FAILURE` + equal values -> show `fail_reason` because status takes precedence over legacy-result compatibility.
+- Any status + empty/whitespace-only `fail_reason` -> no visible failure reason.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: derive failure text once with `getTaskFailureReason` and reuse it for both detail content and failure styling.
+- Base: a modern successful task has `result_url` populated and an empty `fail_reason`; render only the result.
+- Bad: use `Boolean(task.fail_reason)` as the failure predicate, because legacy successful video tasks then appear failed.
+
+#### 6. Tests Required
+
+- Unit test that `SUCCESS` with equal URLs, including whitespace differences, returns no failure text.
+- Regression test that `FAILURE` with equal values still returns the complete failure text.
+- Unit test that `SUCCESS` with distinct failure and result values preserves the failure text.
+- UI consumers must use the same classifier for the failure section and destructive styling.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```ts
+const isFailed = Boolean(task.fail_reason?.trim())
+```
+
+##### Correct
+
+```ts
+const failureReason = getTaskFailureReason(
+  task.status,
+  task.fail_reason,
+  task.result_url
+)
+const isFailed = Boolean(failureReason)
+```
+
+---
+
 ## Testing Requirements
 
 <!-- What level of testing is expected -->

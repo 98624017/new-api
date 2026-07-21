@@ -551,6 +551,54 @@ make verify-patches
 
 ---
 
+## 010-default-task-log-details.patch
+
+**功能**：在 Default 任务日志中提供统一详情弹窗，查看并复制完整上游响应和任务元数据。
+
+**背景**：后端任务接口已返回 `data`，但当前 Default 前端只在有 `fail_reason` 时展示详情，成功任务无法从新版界面检查上游返回内容。Classic 前端虽能打开完整记录，但其大文本悬浮和通用内容弹窗不适合直接复用到新版响应式界面。
+
+**涉及文件（14 个）**：
+
+### 1. `web/default/src/features/usage-logs/types.ts`
+
+补齐任务 DTO 字段，并将不固定形态的 `data` / `properties` 声明为 `unknown`。
+
+### 2. `web/default/src/features/usage-logs/lib/task-details.ts`
+
+集中解析、格式化任务 payload，并投影 Suno 音频条目。
+
+### 3. `web/default/src/features/usage-logs/lib/task-details.test.ts`
+
+覆盖 JSON/非 JSON、标量、空值、序列化失败、音频数组和旧版成功结果 URL 判定等排障契约。
+
+### 4. `web/default/src/features/usage-logs/components/dialogs/task-details-dialog.tsx`
+
+新增完整任务详情弹窗，包括元数据、时间、计费、失败原因、结果、请求属性、上游响应和原始任务 JSON。
+
+### 5. 任务日志桌面与移动入口
+
+- `components/columns/task-logs-columns.tsx`：所有任务固定展示详情按钮，按需挂载弹窗
+- `components/usage-logs-mobile-card.tsx`：移动卡片复用详情入口
+
+### 6. `web/default/src/i18n/locales/*.json`
+
+为 7 个 locale 补齐任务详情文案。
+
+### 7. `scripts/verify_patches.sh`
+
+在补丁重放后的前端定向测试中加入任务 payload 格式化测试。
+
+### 回归验证
+
+```bash
+bun test --cwd web/default src/features/usage-logs/lib/task-details.test.ts
+bun run --cwd web/default typecheck
+bun run --cwd web/default build
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列

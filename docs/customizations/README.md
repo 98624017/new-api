@@ -73,6 +73,12 @@
 - 影响范围：Sora/OpenAI 视频任务状态解析、后台轮询失败判断、视频内容代理
 - 当前状态：已实现，并已生成 `patches/009-sora-unknown-status-polling.patch`
 
+### 010-default-task-log-details
+
+- 目标：在 Default 任务日志中提供统一详情弹窗，展示并复制后端已返回的完整上游响应和任务元数据
+- 影响范围：Default 任务日志类型、响应格式化、桌面/移动详情入口、详情弹窗、前端 i18n
+- 当前状态：已实现，并已生成 `patches/010-default-task-log-details.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -95,7 +101,7 @@
 make verify-patches
 ```
 
-`make verify-patches` 会在临时 worktree 中按顺序重放 001-009，检查 patch
+`make verify-patches` 会在临时 worktree 中按顺序重放 001-010，检查 patch
 所属文件与当前集成树一致，然后执行前端干净安装、共享锁屏测试、双前端构建、
 Go 全量编译和 9 组定向回归。每个编译或测试子命令最多运行 120 秒。
 

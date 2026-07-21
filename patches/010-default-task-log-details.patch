@@ -1,0 +1,1453 @@
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+index acd49b950..406b52997 100644
+--- a/scripts/verify_patches.sh
++++ b/scripts/verify_patches.sh
+@@ -149,9 +149,10 @@ wait_for_checks() {
+ 
+ command -v bun >/dev/null 2>&1 || fail "未找到 bun，无法验证双前端补丁"
+ run_replay_check "安装 patch 重放树的前端依赖" bun install --cwd web --frozen-lockfile
+-run_replay_check "验证共享锁屏状态逻辑" bun test \
++run_replay_check "验证 006/010 前端定制逻辑" bun test \
+   web/shared/frontend-lock.test.ts \
+-  web/default/src/lib/frontend-cache.test.ts
++  web/default/src/lib/frontend-cache.test.ts \
++  web/default/src/features/usage-logs/lib/task-details.test.ts
+ 
+ build_pids=()
+ run_replay_check "编译 default 前端" bun run --cwd web/default build:check &
+diff --git a/web/default/src/features/usage-logs/components/columns/task-logs-columns.tsx b/web/default/src/features/usage-logs/components/columns/task-logs-columns.tsx
+index 24836e627..e089eb234 100644
+--- a/web/default/src/features/usage-logs/components/columns/task-logs-columns.tsx
++++ b/web/default/src/features/usage-logs/components/columns/task-logs-columns.tsx
+@@ -17,25 +17,22 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ import type { ColumnDef } from '@tanstack/react-table'
+-import { Music } from 'lucide-react'
++import { Eye } from 'lucide-react'
+ /* eslint-disable react-refresh/only-export-components */
+-import { useState, useMemo } from 'react'
++import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { StatusBadge } from '@/components/status-badge'
+ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
++import { Button } from '@/components/ui/button'
+ import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
+ import { formatTimestampToDate } from '@/lib/format'
+ import { cn } from '@/lib/utils'
+ 
+-import { TASK_ACTIONS, TASK_STATUS } from '../../constants'
+ import { taskActionMapper, taskStatusMapper } from '../../lib/mappers'
++import { getTaskFailureReason } from '../../lib/task-details'
+ import type { TaskLog } from '../../types'
+-import {
+-  AudioPreviewDialog,
+-  type AudioClip,
+-} from '../dialogs/audio-preview-dialog'
+-import { FailReasonDialog } from '../dialogs/fail-reason-dialog'
++import { TaskDetailsDialog } from '../dialogs/task-details-dialog'
+ import { useUsageLogsContext } from '../usage-logs-provider'
+ import {
+   createDurationColumn,
+@@ -43,49 +40,40 @@ import {
+   createProgressColumn,
+ } from './column-helpers'
+ 
+-function parseTaskData(data: unknown): unknown[] {
+-  if (Array.isArray(data)) return data
+-  if (typeof data === 'string') {
+-    try {
+-      const parsed = JSON.parse(data)
+-      return Array.isArray(parsed) ? parsed : []
+-    } catch {
+-      return []
+-    }
+-  }
+-  return []
+-}
+-
+-function AudioPreviewCell({ log }: { log: TaskLog }) {
++function TaskDetailsCell({ log, isAdmin }: { log: TaskLog; isAdmin: boolean }) {
+   const { t } = useTranslation()
+   const [open, setOpen] = useState(false)
+-  const clips = useMemo(() => {
+-    const data = parseTaskData(log.data)
+-    return data.filter(
+-      (c) =>
+-        c && typeof c === 'object' && (c as Record<string, unknown>).audio_url
+-    )
+-  }, [log.data])
+-
+-  if (clips.length === 0) return null
++  const isFailed = Boolean(
++    getTaskFailureReason(log.status, log.fail_reason, log.result_url)
++  )
+ 
+   return (
+     <>
+-      <button
++      <Button
+         type='button'
+-        className='group flex items-center gap-1 text-left text-xs'
+-        onClick={() => setOpen(true)}
++        variant='ghost'
++        size='sm'
++        className={cn(
++          'h-7 gap-1 px-2 text-xs',
++          isFailed && 'text-destructive hover:text-destructive'
++        )}
++        onClick={(event) => {
++          event.stopPropagation()
++          setOpen(true)
++        }}
++        aria-label={t('View Task Details')}
+       >
+-        <Music className='text-muted-foreground size-3' />
+-        <span className='text-foreground leading-snug group-hover:underline'>
+-          {t('Click to preview audio')}
+-        </span>
+-      </button>
+-      <AudioPreviewDialog
+-        open={open}
+-        onOpenChange={setOpen}
+-        clips={clips as AudioClip[]}
+-      />
++        <Eye data-icon='inline-start' />
++        {t('View')}
++      </Button>
++      {open ? (
++        <TaskDetailsDialog
++          log={log}
++          isAdmin={isAdmin}
++          open={open}
++          onOpenChange={setOpen}
++        />
++      ) : null}
+     </>
+   )
+ }
+@@ -217,76 +205,11 @@ export function useTaskLogsColumns(isAdmin: boolean): ColumnDef<TaskLog>[] {
+       accessorKey: 'fail_reason',
+       header: t('Details'),
+       cell: function DetailsCell({ row }) {
+-        const log = row.original
+-        const failReason = row.getValue('fail_reason') as string
+-        const status = log.status
+-        const [dialogOpen, setDialogOpen] = useState(false)
+-
+-        const isSunoSuccess =
+-          log.platform === 'suno' && status === TASK_STATUS.SUCCESS
+-        if (isSunoSuccess) {
+-          const data = parseTaskData(log.data)
+-          if (
+-            data.some(
+-              (c) =>
+-                c &&
+-                typeof c === 'object' &&
+-                (c as Record<string, unknown>).audio_url
+-            )
+-          ) {
+-            return <AudioPreviewCell log={log} />
+-          }
+-        }
+-
+-        const isVideoTask =
+-          log.action === TASK_ACTIONS.GENERATE ||
+-          log.action === TASK_ACTIONS.TEXT_GENERATE ||
+-          log.action === TASK_ACTIONS.FIRST_TAIL_GENERATE ||
+-          log.action === TASK_ACTIONS.REFERENCE_GENERATE ||
+-          log.action === TASK_ACTIONS.REMIX_GENERATE
+-        const isSuccess = status === TASK_STATUS.SUCCESS
+-        const isUrl = failReason?.startsWith('http')
+-
+-        if (isSuccess && isVideoTask && isUrl) {
+-          const videoUrl = `/v1/videos/${log.task_id}/content`
+-          return (
+-            <a
+-              href={videoUrl}
+-              target='_blank'
+-              rel='noopener noreferrer'
+-              className='text-foreground text-xs hover:underline'
+-            >
+-              {t('Click to preview video')}
+-            </a>
+-          )
+-        }
+-
+-        if (!failReason) {
+-          return <span className='text-muted-foreground/60 text-xs'>-</span>
+-        }
+-
+-        return (
+-          <>
+-            <button
+-              type='button'
+-              className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
+-              onClick={() => setDialogOpen(true)}
+-              title={t('Click to view full error message')}
+-            >
+-              <span className='truncate leading-snug text-red-600 group-hover:underline dark:text-red-400'>
+-                {failReason}
+-              </span>
+-            </button>
+-            <FailReasonDialog
+-              failReason={failReason}
+-              open={dialogOpen}
+-              onOpenChange={setDialogOpen}
+-            />
+-          </>
+-        )
++        return <TaskDetailsCell log={row.original} isAdmin={isAdmin} />
+       },
+-      size: 200,
+-      maxSize: 220,
++      enableSorting: false,
++      size: 120,
++      maxSize: 140,
+     }
+   )
+ 
+diff --git a/web/default/src/features/usage-logs/components/dialogs/task-details-dialog.tsx b/web/default/src/features/usage-logs/components/dialogs/task-details-dialog.tsx
+new file mode 100644
+index 000000000..9d72570e6
+--- /dev/null
++++ b/web/default/src/features/usage-logs/components/dialogs/task-details-dialog.tsx
+@@ -0,0 +1,456 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import {
++  AlertTriangle,
++  ChevronDown,
++  ExternalLink,
++  FileJson,
++  Music,
++} from 'lucide-react'
++import { useMemo, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { CopyButton } from '@/components/copy-button'
++import { Dialog } from '@/components/dialog'
++import { StatusBadge } from '@/components/status-badge'
++import { Button } from '@/components/ui/button'
++import {
++  Collapsible,
++  CollapsibleContent,
++  CollapsibleTrigger,
++} from '@/components/ui/collapsible'
++import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
++import { cn } from '@/lib/utils'
++
++import { TASK_ACTIONS, TASK_STATUS } from '../../constants'
++import { formatDuration } from '../../lib/format'
++import {
++  taskActionMapper,
++  taskPlatformMapper,
++  taskStatusMapper,
++} from '../../lib/mappers'
++import {
++  formatTaskPayload,
++  getTaskAudioClips,
++  getTaskFailureReason,
++  parseTaskPayload,
++} from '../../lib/task-details'
++import type { TaskLog } from '../../types'
++import { AudioPreviewDialog } from './audio-preview-dialog'
++
++const VIDEO_ACTIONS = new Set<string>([
++  TASK_ACTIONS.GENERATE,
++  TASK_ACTIONS.TEXT_GENERATE,
++  TASK_ACTIONS.FIRST_TAIL_GENERATE,
++  TASK_ACTIONS.REFERENCE_GENERATE,
++  TASK_ACTIONS.REMIX_GENERATE,
++])
++const OPENABLE_RESULT_URL_PATTERN = /^(https?:\/\/|\/v1\/videos\/)/i
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function DetailRow(props: {
++  label: string
++  value: React.ReactNode
++  mono?: boolean
++}) {
++  return (
++    <div className='grid min-w-0 gap-1 py-2.5 first:pt-0 last:pb-0 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-3'>
++      <dt className='text-muted-foreground text-xs font-medium'>
++        {props.label}
++      </dt>
++      <dd
++        className={cn(
++          'text-foreground min-w-0 text-sm break-words',
++          props.mono && 'font-mono text-xs'
++        )}
++      >
++        {props.value}
++      </dd>
++    </div>
++  )
++}
++
++function DetailSection(props: {
++  title: string
++  icon?: React.ReactNode
++  action?: React.ReactNode
++  children: React.ReactNode
++}) {
++  return (
++    <section className='flex min-w-0 flex-col gap-2.5 border-t pt-4 first:border-t-0 first:pt-0'>
++      <div className='flex min-w-0 items-center justify-between gap-2'>
++        <h3 className='flex min-w-0 items-center gap-2 text-sm font-semibold'>
++          {props.icon}
++          <span className='truncate'>{props.title}</span>
++        </h3>
++        {props.action}
++      </div>
++      {props.children}
++    </section>
++  )
++}
++
++function PayloadBlock(props: { value: string; label: string }) {
++  const { t } = useTranslation()
++
++  return (
++    <div className='relative min-w-0'>
++      <CopyButton
++        value={props.value}
++        tooltip={t('Copy to clipboard')}
++        className='bg-background/80 absolute top-2 right-2 z-10 size-7'
++        iconClassName='size-3.5'
++        aria-label={t('Copy {{label}}', { label: props.label })}
++      />
++      <pre className='bg-muted/40 max-h-80 min-w-0 overflow-auto rounded-md border p-3 pr-11 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap'>
++        {props.value}
++      </pre>
++    </div>
++  )
++}
++
++interface TaskDetailsDialogProps {
++  log: TaskLog
++  isAdmin: boolean
++  open: boolean
++  onOpenChange: (open: boolean) => void
++}
++
++export function TaskDetailsDialog(props: TaskDetailsDialogProps) {
++  const { t } = useTranslation()
++  const [rawOpen, setRawOpen] = useState(false)
++  const [audioOpen, setAudioOpen] = useState(false)
++
++  const parsedProperties = useMemo(
++    () => parseTaskPayload(props.log.properties),
++    [props.log.properties]
++  )
++  const parsedData = useMemo(
++    () => parseTaskPayload(props.log.data),
++    [props.log.data]
++  )
++  const propertiesText = useMemo(
++    () => formatTaskPayload(props.log.properties),
++    [props.log.properties]
++  )
++  const upstreamResponse = useMemo(
++    () => formatTaskPayload(props.log.data),
++    [props.log.data]
++  )
++  const rawTaskData = useMemo(
++    () => (rawOpen ? formatTaskPayload(props.log) : ''),
++    [props.log, rawOpen]
++  )
++  const audioClips = useMemo(
++    () => getTaskAudioClips(props.log.data),
++    [props.log.data]
++  )
++
++  let model = ''
++  if (isRecord(parsedProperties)) {
++    const originModel = parsedProperties.origin_model_name
++    const upstreamModel = parsedProperties.upstream_model_name
++    if (typeof originModel === 'string') model = originModel
++    else if (typeof upstreamModel === 'string') model = upstreamModel
++  }
++  if (!model && isRecord(parsedData) && typeof parsedData.model === 'string') {
++    model = parsedData.model
++  }
++
++  const duration = formatDuration(
++    props.log.submit_time,
++    props.log.finish_time,
++    'seconds'
++  )
++  const isVideoTask = VIDEO_ACTIONS.has(props.log.action)
++  const videoUrl =
++    isVideoTask && props.log.status === TASK_STATUS.SUCCESS && props.log.task_id
++      ? `/v1/videos/${props.log.task_id}/content`
++      : ''
++  const resultUrl = props.log.result_url?.trim() ?? ''
++  const failureReason = getTaskFailureReason(
++    props.log.status,
++    props.log.fail_reason,
++    resultUrl
++  )
++  const openableResultUrl = OPENABLE_RESULT_URL_PATTERN.test(resultUrl)
++    ? resultUrl
++    : ''
++  const resultLink = videoUrl || openableResultUrl
++  const hasDistinctResultUrl = Boolean(
++    resultUrl && resultUrl !== props.log.fail_reason
++  )
++  const hasResult = Boolean(
++    hasDistinctResultUrl || resultLink || audioClips.length
++  )
++
++  return (
++    <>
++      <Dialog
++        open={props.open}
++        onOpenChange={props.onOpenChange}
++        title={t('Task Details')}
++        description={t('View complete task metadata and upstream response')}
++        contentClassName='max-h-[calc(100dvh-1rem)] max-sm:w-[calc(100%-1rem)] max-sm:max-w-none sm:max-w-3xl'
++        contentHeight='min(72vh, 760px)'
++        bodyClassName='flex flex-col gap-4 py-1'
++        footer={
++          <Button
++            variant='outline'
++            onClick={() => props.onOpenChange(false)}
++            className='w-full sm:w-auto'
++          >
++            {t('Close')}
++          </Button>
++        }
++      >
++        <DetailSection title={t('Task Information')}>
++          <dl className='divide-border divide-y'>
++            <DetailRow
++              label={t('Task ID')}
++              mono
++              value={
++                <span className='flex min-w-0 items-center gap-1.5'>
++                  <span className='min-w-0 break-all'>{props.log.task_id}</span>
++                  <CopyButton
++                    value={props.log.task_id}
++                    tooltip={t('Copy to clipboard')}
++                    className='size-7'
++                    iconClassName='size-3.5'
++                  />
++                </span>
++              }
++            />
++            <DetailRow
++              label={t('Platform')}
++              value={t(
++                taskPlatformMapper.getLabel(
++                  props.log.platform,
++                  props.log.platform || 'Unknown'
++                )
++              )}
++            />
++            <DetailRow
++              label={t('Action')}
++              value={t(
++                taskActionMapper.getLabel(
++                  props.log.action,
++                  props.log.action || 'Unknown'
++                )
++              )}
++            />
++            <DetailRow
++              label={t('Status')}
++              value={
++                <StatusBadge
++                  label={t(
++                    taskStatusMapper.getLabel(
++                      props.log.status,
++                      props.log.status || 'Unknown'
++                    )
++                  )}
++                  variant={taskStatusMapper.getVariant(props.log.status)}
++                  copyable={false}
++                  size='sm'
++                />
++              }
++            />
++            {props.log.progress ? (
++              <DetailRow label={t('Progress')} value={props.log.progress} />
++            ) : null}
++            {model ? <DetailRow label={t('Model')} value={model} mono /> : null}
++          </dl>
++        </DetailSection>
++
++        <DetailSection title={t('Timing')}>
++          <dl className='divide-border divide-y'>
++            <DetailRow
++              label={t('Created At')}
++              value={formatTimestampToDate(props.log.created_at, 'seconds')}
++              mono
++            />
++            <DetailRow
++              label={t('Updated At')}
++              value={formatTimestampToDate(props.log.updated_at, 'seconds')}
++              mono
++            />
++            <DetailRow
++              label={t('Submit Time')}
++              value={formatTimestampToDate(props.log.submit_time, 'seconds')}
++              mono
++            />
++            {props.log.start_time ? (
++              <DetailRow
++                label={t('Start Time')}
++                value={formatTimestampToDate(props.log.start_time, 'seconds')}
++                mono
++              />
++            ) : null}
++            {props.log.finish_time ? (
++              <DetailRow
++                label={t('Finish Time')}
++                value={formatTimestampToDate(props.log.finish_time, 'seconds')}
++                mono
++              />
++            ) : null}
++            {duration ? (
++              <DetailRow
++                label={t('Duration')}
++                value={`${duration.durationSec.toFixed(1)}s`}
++                mono
++              />
++            ) : null}
++          </dl>
++        </DetailSection>
++
++        <DetailSection title={t('Billing')}>
++          <dl className='divide-border divide-y'>
++            <DetailRow
++              label={t('Cost')}
++              value={formatLogQuota(props.log.quota)}
++              mono
++            />
++            {props.log.group ? (
++              <DetailRow label={t('Group')} value={props.log.group} mono />
++            ) : null}
++            {props.isAdmin ? (
++              <DetailRow
++                label={t('Channel')}
++                value={`#${props.log.channel_id}`}
++                mono
++              />
++            ) : null}
++            {props.isAdmin && props.log.username ? (
++              <DetailRow label={t('User')} value={props.log.username} />
++            ) : null}
++            {props.isAdmin ? (
++              <DetailRow
++                label={t('User ID')}
++                value={String(props.log.user_id)}
++                mono
++              />
++            ) : null}
++          </dl>
++        </DetailSection>
++
++        {propertiesText ? (
++          <DetailSection title={t('Request Properties')}>
++            <PayloadBlock
++              value={propertiesText}
++              label={t('Request Properties')}
++            />
++          </DetailSection>
++        ) : null}
++
++        {failureReason ? (
++          <DetailSection
++            title={t('Fail Reason')}
++            icon={<AlertTriangle className='text-destructive size-4' />}
++          >
++            <PayloadBlock value={failureReason} label={t('Fail Reason')} />
++          </DetailSection>
++        ) : null}
++
++        {hasResult ? (
++          <DetailSection title={t('Result')}>
++            <div className='flex flex-col gap-3'>
++              {hasDistinctResultUrl ? (
++                <PayloadBlock value={resultUrl} label={t('Result URL')} />
++              ) : null}
++              <div className='flex flex-wrap gap-2'>
++                {resultLink ? (
++                  <Button
++                    variant='outline'
++                    size='sm'
++                    onClick={() =>
++                      window.open(resultLink, '_blank', 'noopener,noreferrer')
++                    }
++                  >
++                    <ExternalLink data-icon='inline-start' />
++                    {t('Open in new tab')}
++                  </Button>
++                ) : null}
++                {audioClips.length ? (
++                  <Button
++                    variant='outline'
++                    size='sm'
++                    onClick={() => setAudioOpen(true)}
++                  >
++                    <Music data-icon='inline-start' />
++                    {t('Audio Preview')}
++                  </Button>
++                ) : null}
++              </div>
++            </div>
++          </DetailSection>
++        ) : null}
++
++        {upstreamResponse ? (
++          <DetailSection title={t('Upstream Response')}>
++            <PayloadBlock
++              value={upstreamResponse}
++              label={t('Upstream Response')}
++            />
++          </DetailSection>
++        ) : null}
++
++        <Collapsible open={rawOpen} onOpenChange={setRawOpen}>
++          <DetailSection
++            title={t('Raw Task Data')}
++            icon={<FileJson className='text-muted-foreground size-4' />}
++            action={
++              <CollapsibleTrigger
++                render={
++                  <Button
++                    type='button'
++                    variant='ghost'
++                    size='sm'
++                    className='h-7 gap-1 px-2 text-xs'
++                  />
++                }
++              >
++                {rawOpen ? t('Hide') : t('Show')}
++                <ChevronDown
++                  data-icon='inline-end'
++                  className={cn(
++                    'transition-transform',
++                    rawOpen && 'rotate-180'
++                  )}
++                />
++              </CollapsibleTrigger>
++            }
++          >
++            <CollapsibleContent>
++              <PayloadBlock value={rawTaskData} label={t('Raw Task Data')} />
++            </CollapsibleContent>
++          </DetailSection>
++        </Collapsible>
++      </Dialog>
++
++      <AudioPreviewDialog
++        open={audioOpen}
++        onOpenChange={setAudioOpen}
++        clips={audioClips}
++      />
++    </>
++  )
++}
+diff --git a/web/default/src/features/usage-logs/components/usage-logs-mobile-card.tsx b/web/default/src/features/usage-logs/components/usage-logs-mobile-card.tsx
+index 9e4261a3c..e2fd1a3a8 100644
+--- a/web/default/src/features/usage-logs/components/usage-logs-mobile-card.tsx
++++ b/web/default/src/features/usage-logs/components/usage-logs-mobile-card.tsx
+@@ -391,7 +391,7 @@ function TaskLogsCard<TData>({
+         <SummaryField label={t('Submit Time')} cell={submitTimeCell} />
+         <SummaryField label={t('User')} cell={cells.get('user')} primaryOnly />
+         <SummaryField
+-          label={t('Result')}
++          label={t('Details')}
+           cell={cells.get('fail_reason')}
+           className='col-span-2 bg-transparent px-0 py-0'
+         />
+diff --git a/web/default/src/features/usage-logs/lib/task-details.test.ts b/web/default/src/features/usage-logs/lib/task-details.test.ts
+new file mode 100644
+index 000000000..3bd1d8777
+--- /dev/null
++++ b/web/default/src/features/usage-logs/lib/task-details.test.ts
+@@ -0,0 +1,114 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import assert from 'node:assert/strict'
++import { describe, test } from 'node:test'
++
++import {
++  formatTaskPayload,
++  getTaskAudioClips,
++  getTaskFailureReason,
++  parseTaskPayload,
++} from './task-details'
++
++describe('task detail payload formatting', () => {
++  test('formats decoded objects, arrays, and scalars as readable JSON', () => {
++    assert.equal(
++      formatTaskPayload({ status: 'SUCCESS', progress: 100 }),
++      '{\n  "status": "SUCCESS",\n  "progress": 100\n}'
++    )
++    assert.equal(formatTaskPayload(['a', 2]), '[\n  "a",\n  2\n]')
++    assert.equal(formatTaskPayload(false), 'false')
++    assert.equal(formatTaskPayload(0), '0')
++  })
++
++  test('pretty prints JSON strings and preserves ordinary strings', () => {
++    assert.deepEqual(parseTaskPayload('{"id":"upstream-1"}'), {
++      id: 'upstream-1',
++    })
++    assert.equal(
++      formatTaskPayload('{"id":"upstream-1"}'),
++      '{\n  "id": "upstream-1"\n}'
++    )
++    assert.equal(
++      formatTaskPayload('upstream unavailable'),
++      'upstream unavailable'
++    )
++  })
++
++  test('treats nullish and whitespace-only payloads as empty', () => {
++    assert.equal(formatTaskPayload(undefined), '')
++    assert.equal(formatTaskPayload(null), '')
++    assert.equal(formatTaskPayload('   '), '')
++  })
++
++  test('falls back safely when a decoded value cannot be serialized', () => {
++    const cyclic: Record<string, unknown> = {}
++    cyclic.self = cyclic
++
++    assert.equal(formatTaskPayload(cyclic), '[object Object]')
++    assert.equal(formatTaskPayload(10n), '10')
++  })
++
++  test('extracts playable audio clips from decoded and encoded arrays', () => {
++    const clips = [
++      { id: 'clip-1', audio_url: 'https://example.com/audio.mp3' },
++      { id: 'clip-2', audio_url: '' },
++      { id: 'clip-3' },
++      null,
++    ]
++
++    assert.deepEqual(getTaskAudioClips(clips), [clips[0]])
++    assert.deepEqual(getTaskAudioClips(JSON.stringify(clips)), [clips[0]])
++    assert.deepEqual(getTaskAudioClips({ audio_url: 'not-an-array' }), [])
++  })
++
++  test('does not treat a legacy successful result URL as a failure', () => {
++    const legacyResultUrl = 'https://example.com/result.mp4'
++
++    assert.equal(
++      getTaskFailureReason('SUCCESS', legacyResultUrl, legacyResultUrl),
++      ''
++    )
++    assert.equal(
++      getTaskFailureReason(
++        'SUCCESS',
++        `  ${legacyResultUrl}  `,
++        legacyResultUrl
++      ),
++      ''
++    )
++    assert.equal(
++      getTaskFailureReason('FAILURE', 'upstream failed', legacyResultUrl),
++      'upstream failed'
++    )
++    assert.equal(
++      getTaskFailureReason('FAILURE', legacyResultUrl, legacyResultUrl),
++      legacyResultUrl
++    )
++    assert.equal(
++      getTaskFailureReason(
++        'SUCCESS',
++        'partial upstream warning',
++        legacyResultUrl
++      ),
++      'partial upstream warning'
++    )
++  })
++})
+diff --git a/web/default/src/features/usage-logs/lib/task-details.ts b/web/default/src/features/usage-logs/lib/task-details.ts
+new file mode 100644
+index 000000000..63c2d665d
+--- /dev/null
++++ b/web/default/src/features/usage-logs/lib/task-details.ts
+@@ -0,0 +1,103 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { TASK_STATUS } from '../constants'
++
++export interface TaskAudioClip {
++  clip_id?: string
++  id?: string
++  title?: string
++  tags?: string
++  duration?: number
++  audio_url: string
++  image_url?: string
++  image_large_url?: string
++  metadata?: {
++    tags?: string
++    duration?: number
++  }
++}
++
++function stringifyTaskPayload(value: unknown): string {
++  try {
++    const serialized = JSON.stringify(value, null, 2)
++    if (serialized !== undefined) return serialized
++  } catch {
++    // Fall through to a readable scalar representation.
++  }
++
++  try {
++    return String(value)
++  } catch {
++    return ''
++  }
++}
++
++export function parseTaskPayload(value: unknown): unknown {
++  if (typeof value !== 'string') return value
++
++  const trimmed = value.trim()
++  if (trimmed === '') return null
++
++  try {
++    return JSON.parse(trimmed)
++  } catch {
++    return value
++  }
++}
++
++export function formatTaskPayload(value: unknown): string {
++  if (value == null) return ''
++
++  const parsed = parseTaskPayload(value)
++  if (parsed == null) return ''
++  if (typeof parsed === 'string') return parsed
++  return stringifyTaskPayload(parsed)
++}
++
++export function getTaskAudioClips(value: unknown): TaskAudioClip[] {
++  const parsed = parseTaskPayload(value)
++  if (!Array.isArray(parsed)) return []
++
++  return parsed.filter(
++    (item): item is TaskAudioClip =>
++      typeof item === 'object' &&
++      item !== null &&
++      typeof (item as { audio_url?: unknown }).audio_url === 'string' &&
++      (item as { audio_url: string }).audio_url.trim() !== ''
++  )
++}
++
++export function getTaskFailureReason(
++  status: string,
++  failReason?: string,
++  resultUrl?: string
++): string {
++  const normalizedFailureReason = failReason?.trim() ?? ''
++  const normalizedResultUrl = resultUrl?.trim() ?? ''
++
++  if (
++    status === TASK_STATUS.SUCCESS &&
++    normalizedFailureReason === normalizedResultUrl
++  ) {
++    return ''
++  }
++
++  return normalizedFailureReason
++}
+diff --git a/web/default/src/features/usage-logs/types.ts b/web/default/src/features/usage-logs/types.ts
+index a03d39354..c54a5f54d 100644
+--- a/web/default/src/features/usage-logs/types.ts
++++ b/web/default/src/features/usage-logs/types.ts
+@@ -278,22 +278,27 @@ export interface MidjourneyLog {
+ 
+ export interface TaskLog {
+   id: number
++  created_at: number
++  updated_at: number
+   user_id: number
+   username?: string
+   platform: string // suno, kling, runway, etc.
+   task_id: string
+   action: string // MUSIC, LYRICS, GENERATE, TEXT_GENERATE, etc.
+   channel_id: number
++  group: string
++  quota: number
+   submit_time: number // seconds
++  start_time?: number // seconds
+   finish_time?: number // seconds
+   progress?: string
+   progress_message_en?: string
+-  data?: string // JSON string
++  data?: unknown
++  properties?: unknown
+   fail_reason?: string
++  result_url?: string
+   status: string // NOT_START, SUBMITTED, IN_PROGRESS, SUCCESS, FAILURE, QUEUED, UNKNOWN
+   other?: string
+-  created_at?: number
+-  updated_at?: number
+ }
+ 
+ // ============================================================================
+diff --git a/web/default/src/i18n/locales/en.json b/web/default/src/i18n/locales/en.json
+index decc56bed..967a14201 100644
+--- a/web/default/src/i18n/locales/en.json
++++ b/web/default/src/i18n/locales/en.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "Copied: {{model}}",
+     "Copied!": "Copied!",
+     "Copy": "Copy",
++    "Copy {{label}}": "Copy {{label}}",
+     "Copy {{name}} pricing": "Copy {{name}} pricing",
+     "Copy a request header": "Copy a request header",
+     "Copy All": "Copy All",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "Raw JSON",
+     "Raw Quota": "Raw Quota",
+     "Raw response": "Raw response",
++    "Raw Task Data": "Raw Task Data",
+     "Re-enable on success": "Re-enable on success",
+     "Re-login": "Re-login",
+     "Read channels": "Read channels",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "Request Model",
+     "Request Model:": "Request Model:",
+     "Request overrides, routing behavior, and upstream model automation": "Request overrides, routing behavior, and upstream model automation",
++    "Request Properties": "Request Properties",
+     "Request retry": "Request retry",
+     "Request rule pricing": "Request rule pricing",
+     "Request success rate sampled over the last 24 hours": "Request success rate sampled over the last 24 hours",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "Restore defaults",
+     "Restrict user model request frequency (may impact high concurrency performance)": "Restrict user model request frequency (may impact high concurrency performance)",
+     "Result": "Result",
++    "Result URL": "Result URL",
+     "Retain last N days": "Retain last N days",
+     "Retain last N files": "Retain last N files",
+     "Retention days": "Retention days",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "Target Path (optional)",
+     "Target User": "Target User",
+     "Task": "Task",
++    "Task Details": "Task Details",
+     "Task History": "Task History",
+     "Task ID": "Task ID",
+     "Task ID:": "Task ID:",
++    "Task Information": "Task Information",
+     "Task logs": "Task logs",
+     "Task Logs": "Task Logs",
+     "Tasks currently pending or running.": "Tasks currently pending or running.",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "Updated a redemption code",
+     "Updated a subscription plan": "Updated a subscription plan",
+     "Updated a vendor": "Updated a vendor",
++    "Updated At": "Updated At",
+     "Updated channel {{name}} (ID: {{id}})": "Updated channel {{name}} (ID: {{id}})",
+     "Updated daily": "Updated daily",
+     "Updated successfully": "Updated successfully",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "View all currently available models",
+     "View channel lists and details without secrets.": "View channel lists and details without secrets.",
+     "View channel secrets": "View channel secrets",
++    "View complete task metadata and upstream response": "View complete task metadata and upstream response",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "View detailed information about this user including balance, usage statistics, and invitation details.",
+     "View details": "View details",
+     "View document": "View document",
+@@ -5008,6 +5016,7 @@
+     "View mode": "View mode",
+     "View model statistics and charts": "View model statistics and charts",
+     "View Pricing": "View Pricing",
++    "View Task Details": "View Task Details",
+     "View the complete details for this": "View the complete details for this",
+     "View the complete details for this log entry": "View the complete details for this log entry",
+     "View the complete error message and details": "View the complete error message and details",
+diff --git a/web/default/src/i18n/locales/fr.json b/web/default/src/i18n/locales/fr.json
+index feed05ea5..0d1add69f 100644
+--- a/web/default/src/i18n/locales/fr.json
++++ b/web/default/src/i18n/locales/fr.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "Copié : {{model}}",
+     "Copied!": "Copié !",
+     "Copy": "Copier",
++    "Copy {{label}}": "Copier {{label}}",
+     "Copy {{name}} pricing": "Copier la tarification de {{name}}",
+     "Copy a request header": "Copier un en-tête de requête",
+     "Copy All": "Tout copier",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "JSON brut",
+     "Raw Quota": "Quota brut",
+     "Raw response": "Reponse brute",
++    "Raw Task Data": "Données brutes de la tâche",
+     "Re-enable on success": "Réactiver en cas de succès",
+     "Re-login": "Se reconnecter",
+     "Read channels": "Lire les canaux",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "Modèle demandé",
+     "Request Model:": "Modèle demandé :",
+     "Request overrides, routing behavior, and upstream model automation": "Surcharges de requête, comportement de routage et automatisation des modèles amont",
++    "Request Properties": "Propriétés de la requête",
+     "Request retry": "Relance des requêtes",
+     "Request rule pricing": "Règles de tarification de requête",
+     "Request success rate sampled over the last 24 hours": "Taux de réussite des requêtes échantillonné sur les dernières 24 heures",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "Restaurer les paramètres par défaut",
+     "Restrict user model request frequency (may impact high concurrency performance)": "Restreindre la fréquence des requêtes du modèle utilisateur (peut impacter les performances en cas de forte concurrence)",
+     "Result": "Résultat",
++    "Result URL": "URL du résultat",
+     "Retain last N days": "Conserver les N derniers jours",
+     "Retain last N files": "Conserver les N derniers fichiers",
+     "Retention days": "Jours de rétention",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "Chemin cible (optionnel)",
+     "Target User": "Utilisateur cible",
+     "Task": "Tâche",
++    "Task Details": "Détails de la tâche",
+     "Task History": "Historique des tâches",
+     "Task ID": "ID de la tâche",
+     "Task ID:": "ID de tâche :",
++    "Task Information": "Informations sur la tâche",
+     "Task logs": "Journaux des tâches",
+     "Task Logs": "Journaux de tâches",
+     "Tasks currently pending or running.": "Tâches actuellement en attente ou en cours d’exécution.",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "Code de réduction mis à jour",
+     "Updated a subscription plan": "Forfait d'abonnement mis à jour",
+     "Updated a vendor": "Fournisseur mis à jour",
++    "Updated At": "Mis à jour le",
+     "Updated channel {{name}} (ID: {{id}})": "Canal {{name}} mis à jour (ID : {{id}})",
+     "Updated daily": "Mis à jour quotidiennement",
+     "Updated successfully": "Mise à jour réussie",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "Voir tous les modèles actuellement disponibles",
+     "View channel lists and details without secrets.": "Afficher les listes et détails des canaux sans secrets.",
+     "View channel secrets": "Voir les secrets des canaux",
++    "View complete task metadata and upstream response": "Afficher les métadonnées complètes de la tâche et la réponse en amont",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "Afficher des informations détaillées sur cet utilisateur, y compris le solde, les statistiques d'utilisation et les détails d'invitation.",
+     "View details": "Voir les détails",
+     "View document": "Afficher le document",
+@@ -5008,6 +5016,7 @@
+     "View mode": "Mode d'affichage",
+     "View model statistics and charts": "Afficher les statistiques et graphiques des modèles",
+     "View Pricing": "Voir les tarifs",
++    "View Task Details": "Voir les détails de la tâche",
+     "View the complete details for this": "Voir les détails complets de ce",
+     "View the complete details for this log entry": "Voir les détails complets de cette entrée de journal",
+     "View the complete error message and details": "Voir le message d'erreur et les détails complets",
+diff --git a/web/default/src/i18n/locales/ja.json b/web/default/src/i18n/locales/ja.json
+index a368664ab..f6f697cd6 100644
+--- a/web/default/src/i18n/locales/ja.json
++++ b/web/default/src/i18n/locales/ja.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "コピーしました: {{model}}",
+     "Copied!": "コピーしました！",
+     "Copy": "コピー",
++    "Copy {{label}}": "{{label}}をコピー",
+     "Copy {{name}} pricing": "{{name}} の料金をコピー",
+     "Copy a request header": "リクエストヘッダーをコピー",
+     "Copy All": "すべてコピー",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "生 JSON",
+     "Raw Quota": "元のクォータ",
+     "Raw response": "生の応答",
++    "Raw Task Data": "タスクの生データ",
+     "Re-enable on success": "成功時に再有効化",
+     "Re-login": "再ログイン",
+     "Read channels": "チャネルを読み取り",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "リクエストモデル",
+     "Request Model:": "リクエストモデル：",
+     "Request overrides, routing behavior, and upstream model automation": "リクエスト上書き、ルーティング動作、上流モデル自動化",
++    "Request Properties": "リクエストプロパティ",
+     "Request retry": "リクエスト再試行",
+     "Request rule pricing": "リクエストルールの課金",
+     "Request success rate sampled over the last 24 hours": "過去 24 時間にサンプリングされたリクエスト成功率",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "既定に戻す",
+     "Restrict user model request frequency (may impact high concurrency performance)": "ユーザーモデルのリクエスト頻度を制限する（高並行性パフォーマンスに影響を与える可能性があります）",
+     "Result": "結果",
++    "Result URL": "結果 URL",
+     "Retain last N days": "最新N日間を保持",
+     "Retain last N files": "最新N個のファイルを保持",
+     "Retention days": "保持日数",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "ターゲットパス（任意）",
+     "Target User": "対象ユーザー",
+     "Task": "タスク",
++    "Task Details": "タスク詳細",
+     "Task History": "タスク履歴",
+     "Task ID": "タスクID",
+     "Task ID:": "タスクID：",
++    "Task Information": "タスク情報",
+     "Task logs": "タスクログ",
+     "Task Logs": "タスクログ",
+     "Tasks currently pending or running.": "現在待機中または実行中のタスクです。",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "引換コードを更新しました",
+     "Updated a subscription plan": "サブスクリプションプランを更新しました",
+     "Updated a vendor": "ベンダーを更新しました",
++    "Updated At": "更新日時",
+     "Updated channel {{name}} (ID: {{id}})": "チャネル {{name}} を更新しました（ID: {{id}}）",
+     "Updated daily": "毎日更新",
+     "Updated successfully": "正常に更新されました",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "現在利用可能なすべてのモデルを表示",
+     "View channel lists and details without secrets.": "シークレットを含まないチャネル一覧と詳細を表示します。",
+     "View channel secrets": "チャンネルシークレットを表示",
++    "View complete task metadata and upstream response": "タスクの完全なメタデータとアップストリーム応答を表示します",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "残高、使用統計、招待の詳細など、このユーザーに関する詳細情報を表示します。",
+     "View details": "詳細を表示",
+     "View document": "ドキュメントを表示",
+@@ -5008,6 +5016,7 @@
+     "View mode": "表示モード",
+     "View model statistics and charts": "モデルの統計とグラフを表示",
+     "View Pricing": "価格を見る",
++    "View Task Details": "タスク詳細を表示",
+     "View the complete details for this": "この",
+     "View the complete details for this log entry": "このログエントリの完全な詳細を表示",
+     "View the complete error message and details": "エラーメッセージと詳細を表示",
+diff --git a/web/default/src/i18n/locales/ru.json b/web/default/src/i18n/locales/ru.json
+index 996e68399..fda1d8c5a 100644
+--- a/web/default/src/i18n/locales/ru.json
++++ b/web/default/src/i18n/locales/ru.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "Скопировано: {{model}}",
+     "Copied!": "Скопировано!",
+     "Copy": "Копировать",
++    "Copy {{label}}": "Копировать: {{label}}",
+     "Copy {{name}} pricing": "Копировать тариф {{name}}",
+     "Copy a request header": "Копировать заголовок запроса",
+     "Copy All": "Скопировать все",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "Сырой JSON",
+     "Raw Quota": "Исходная квота",
+     "Raw response": "Исходный ответ",
++    "Raw Task Data": "Исходные данные задачи",
+     "Re-enable on success": "Повторно включить при успехе",
+     "Re-login": "Повторный вход",
+     "Read channels": "Чтение каналов",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "Запрошенная модель",
+     "Request Model:": "Модель запроса:",
+     "Request overrides, routing behavior, and upstream model automation": "Переопределения запросов, маршрутизация и автоматизация upstream-моделей",
++    "Request Properties": "Параметры запроса",
+     "Request retry": "Повтор запросов",
+     "Request rule pricing": "Правила ценообразования по запросу",
+     "Request success rate sampled over the last 24 hours": "Доля успешных запросов по выборкам за последние 24 часа",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "Сбросить к значениям по умолчанию",
+     "Restrict user model request frequency (may impact high concurrency performance)": "Ограничить частоту запросов пользовательских моделей (может повлиять на производительность при высокой конкуренции)",
+     "Result": "Результат",
++    "Result URL": "URL результата",
+     "Retain last N days": "Хранить последние N дней",
+     "Retain last N files": "Хранить последние N файлов",
+     "Retention days": "Дней хранения",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "Целевой путь (необязательно)",
+     "Target User": "Целевой пользователь",
+     "Task": "Задача",
++    "Task Details": "Сведения о задаче",
+     "Task History": "История задач",
+     "Task ID": "ID задачи",
+     "Task ID:": "ID задачи:",
++    "Task Information": "Информация о задаче",
+     "Task logs": "Журналы задач",
+     "Task Logs": "Журнал задач",
+     "Tasks currently pending or running.": "Задачи, которые ожидают выполнения или выполняются сейчас.",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "Код погашения обновлён",
+     "Updated a subscription plan": "Обновлён тарифный план подписки",
+     "Updated a vendor": "Обновлён поставщик",
++    "Updated At": "Время обновления",
+     "Updated channel {{name}} (ID: {{id}})": "Обновлён канал {{name}} (ID: {{id}})",
+     "Updated daily": "Обновляется ежедневно",
+     "Updated successfully": "Обновлено успешно",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "Просмотреть все доступные модели",
+     "View channel lists and details without secrets.": "Просмотр списков и сведений о каналах без секретов.",
+     "View channel secrets": "Просматривать секреты каналов",
++    "View complete task metadata and upstream response": "Просмотр полных метаданных задачи и ответа вышестоящего сервиса",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "Просмотр подробной информации об этом пользователе, включая баланс, статистику использования и данные приглашения.",
+     "View details": "Просмотреть детали",
+     "View document": "Просмотреть документ",
+@@ -5008,6 +5016,7 @@
+     "View mode": "Режим отображения",
+     "View model statistics and charts": "Просмотр статистики и графиков моделей",
+     "View Pricing": "Посмотреть цены",
++    "View Task Details": "Просмотреть сведения о задаче",
+     "View the complete details for this": "Просмотр полных деталей этой",
+     "View the complete details for this log entry": "Просмотр полной информации об этой записи журнала",
+     "View the complete error message and details": "Просмотр полного сообщения об ошибке и деталей",
+diff --git a/web/default/src/i18n/locales/vi.json b/web/default/src/i18n/locales/vi.json
+index 533d58290..ca27fdead 100644
+--- a/web/default/src/i18n/locales/vi.json
++++ b/web/default/src/i18n/locales/vi.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "Đã sao chép: {{model}}",
+     "Copied!": "Đã sao chép!",
+     "Copy": "Sao chép",
++    "Copy {{label}}": "Sao chép {{label}}",
+     "Copy {{name}} pricing": "Sao chép giá của {{name}}",
+     "Copy a request header": "Sao chép header yêu cầu",
+     "Copy All": "Sao chép tất cả",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "JSON thô",
+     "Raw Quota": "Hạn mức gốc",
+     "Raw response": "Phản hồi thô",
++    "Raw Task Data": "Dữ liệu thô của tác vụ",
+     "Re-enable on success": "Kích hoạt lại khi thành công",
+     "Re-login": "Đăng nhập lại",
+     "Read channels": "Đọc kênh",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "Mô hình yêu cầu",
+     "Request Model:": "Mô hình yêu cầu:",
+     "Request overrides, routing behavior, and upstream model automation": "Ghi đè yêu cầu, hành vi định tuyến và tự động hóa mô hình upstream",
++    "Request Properties": "Thuộc tính yêu cầu",
+     "Request retry": "Thử lại yêu cầu",
+     "Request rule pricing": "Quy tắc tính giá theo request",
+     "Request success rate sampled over the last 24 hours": "Tỷ lệ yêu cầu thành công được lấy mẫu trong 24 giờ qua",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "Khôi phục mặc định",
+     "Restrict user model request frequency (may impact high concurrency performance)": "Hạn chế tần suất yêu cầu mô hình người dùng (có thể ảnh hưởng đến hiệu suất khi có độ đồng thời cao)",
+     "Result": "Kết quả",
++    "Result URL": "URL kết quả",
+     "Retain last N days": "Giữ lại N ngày gần nhất",
+     "Retain last N files": "Giữ lại N tệp gần nhất",
+     "Retention days": "Số ngày lưu giữ",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "Đường dẫn đích (tùy chọn)",
+     "Target User": "Người dùng mục tiêu",
+     "Task": "Nhiệm vụ",
++    "Task Details": "Chi tiết tác vụ",
+     "Task History": "Lịch sử tác vụ",
+     "Task ID": "Mã nhiệm vụ",
+     "Task ID:": "ID nhiệm vụ:",
++    "Task Information": "Thông tin tác vụ",
+     "Task logs": "Nhật ký tác vụ",
+     "Task Logs": "Nhật ký tác vụ",
+     "Tasks currently pending or running.": "Các tác vụ hiện đang chờ hoặc đang chạy.",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "Đã cập nhật một mã đổi thưởng",
+     "Updated a subscription plan": "Đã cập nhật một gói đăng ký",
+     "Updated a vendor": "Đã cập nhật một nhà cung cấp",
++    "Updated At": "Thời gian cập nhật",
+     "Updated channel {{name}} (ID: {{id}})": "Đã cập nhật kênh {{name}} (ID: {{id}})",
+     "Updated daily": "Cập nhật hàng ngày",
+     "Updated successfully": "Cập nhật thành công",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "Xem tất cả mô hình hiện có",
+     "View channel lists and details without secrets.": "Xem danh sách và chi tiết kênh không chứa bí mật.",
+     "View channel secrets": "Xem bí mật kênh",
++    "View complete task metadata and upstream response": "Xem toàn bộ siêu dữ liệu tác vụ và phản hồi từ thượng nguồn",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "Xem thông tin chi tiết về người dùng này bao gồm số dư, thống kê sử dụng và chi tiết lời mời.",
+     "View details": "Xem chi tiết",
+     "View document": "Xem tài liệu",
+@@ -5008,6 +5016,7 @@
+     "View mode": "Chế độ xem",
+     "View model statistics and charts": "Xem thống kê và biểu đồ mô hình",
+     "View Pricing": "View price",
++    "View Task Details": "Xem chi tiết tác vụ",
+     "View the complete details for this": "Xem chi tiết đầy đủ của",
+     "View the complete details for this log entry": "Xem chi tiết đầy đủ cho mục nhật ký này",
+     "View the complete error message and details": "Xem toàn bộ thông báo lỗi và chi tiết",
+diff --git a/web/default/src/i18n/locales/zh-TW.json b/web/default/src/i18n/locales/zh-TW.json
+index f90e2dd52..8f0c8d2c6 100644
+--- a/web/default/src/i18n/locales/zh-TW.json
++++ b/web/default/src/i18n/locales/zh-TW.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "已複製: {{model}}",
+     "Copied!": "已複製！",
+     "Copy": "複製",
++    "Copy {{label}}": "複製{{label}}",
+     "Copy {{name}} pricing": "複製 {{name}} 定價",
+     "Copy a request header": "複製請求頭",
+     "Copy All": "全部複製",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "原始 JSON",
+     "Raw Quota": "原生額度",
+     "Raw response": "原始回覆",
++    "Raw Task Data": "原始任務資料",
+     "Re-enable on success": "成功後重新啟用",
+     "Re-login": "重新登入",
+     "Read channels": "讀取渠道",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "請求模型",
+     "Request Model:": "請求模型：",
+     "Request overrides, routing behavior, and upstream model automation": "請求覆蓋、路由行為和上游模型自動化",
++    "Request Properties": "請求屬性",
+     "Request retry": "請求重試",
+     "Request rule pricing": "請求規則收費",
+     "Request success rate sampled over the last 24 hours": "最近 24 小時按時間桶採樣的請求成功率",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "恢復預設",
+     "Restrict user model request frequency (may impact high concurrency performance)": "限制用戶模型請求頻率（可能會影響高並發效能）",
+     "Result": "結果",
++    "Result URL": "結果 URL",
+     "Retain last N days": "保留最近N天",
+     "Retain last N files": "保留最近 N 個檔案",
+     "Retention days": "保留天數",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "目標路徑（可選）",
+     "Target User": "目標用戶",
+     "Task": "任務",
++    "Task Details": "任務詳情",
+     "Task History": "歷史任務",
+     "Task ID": "任務 ID",
+     "Task ID:": "任務 ID：",
++    "Task Information": "任務資訊",
+     "Task logs": "任務日誌",
+     "Task Logs": "任務日誌",
+     "Tasks currently pending or running.": "目前等待中或執行中的任務。",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "更新了一個兌換碼",
+     "Updated a subscription plan": "更新了一個訂閱計劃",
+     "Updated a vendor": "更新了一個供應商",
++    "Updated At": "更新時間",
+     "Updated channel {{name}} (ID: {{id}})": "更新渠道 {{name}}（ID: {{id}}）",
+     "Updated daily": "每日更新",
+     "Updated successfully": "更新成功",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "查看目前可用的所有模型",
+     "View channel lists and details without secrets.": "查看不含金鑰的渠道列表和詳情。",
+     "View channel secrets": "查看渠道金鑰",
++    "View complete task metadata and upstream response": "查看完整任務中繼資料和上游回應",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "查看此用戶的詳細資訊，包括餘額、使用統計和邀請詳情。",
+     "View details": "查看詳情",
+     "View document": "查看文檔",
+@@ -5008,6 +5016,7 @@
+     "View mode": "檢視模式",
+     "View model statistics and charts": "查看模型統計和圖表",
+     "View Pricing": "查看定價",
++    "View Task Details": "查看任務詳情",
+     "View the complete details for this": "查看此條",
+     "View the complete details for this log entry": "查看此日誌條目的完整詳情",
+     "View the complete error message and details": "查看完整錯誤資訊與詳情",
+diff --git a/web/default/src/i18n/locales/zh.json b/web/default/src/i18n/locales/zh.json
+index a754561bd..a45fe5aac 100644
+--- a/web/default/src/i18n/locales/zh.json
++++ b/web/default/src/i18n/locales/zh.json
+@@ -1069,6 +1069,7 @@
+     "Copied: {{model}}": "已复制: {{model}}",
+     "Copied!": "已复制！",
+     "Copy": "复制",
++    "Copy {{label}}": "复制{{label}}",
+     "Copy {{name}} pricing": "复制 {{name}} 定价",
+     "Copy a request header": "复制请求头",
+     "Copy All": "全部复制",
+@@ -3611,6 +3612,7 @@
+     "Raw JSON": "原始 JSON",
+     "Raw Quota": "原生额度",
+     "Raw response": "原始回复",
++    "Raw Task Data": "原始任务数据",
+     "Re-enable on success": "成功后重新启用",
+     "Re-login": "重新登录",
+     "Read channels": "读取渠道",
+@@ -3765,6 +3767,7 @@
+     "Request Model": "请求模型",
+     "Request Model:": "请求模型：",
+     "Request overrides, routing behavior, and upstream model automation": "请求覆盖、路由行为和上游模型自动化",
++    "Request Properties": "请求属性",
+     "Request retry": "请求重试",
+     "Request rule pricing": "请求规则计费",
+     "Request success rate sampled over the last 24 hours": "最近 24 小时按时间桶采样的请求成功率",
+@@ -3840,6 +3843,7 @@
+     "Restore defaults": "恢复默认",
+     "Restrict user model request frequency (may impact high concurrency performance)": "限制用户模型请求频率（可能会影响高并发性能）",
+     "Result": "结果",
++    "Result URL": "结果 URL",
+     "Retain last N days": "保留最近N天",
+     "Retain last N files": "保留最近 N 个文件",
+     "Retention days": "保留天数",
+@@ -4402,9 +4406,11 @@
+     "Target Path (optional)": "目标路径（可选）",
+     "Target User": "目标用户",
+     "Task": "任务",
++    "Task Details": "任务详情",
+     "Task History": "历史任务",
+     "Task ID": "任务 ID",
+     "Task ID:": "任务 ID：",
++    "Task Information": "任务信息",
+     "Task logs": "任务日志",
+     "Task Logs": "任务日志",
+     "Tasks currently pending or running.": "当前等待中或运行中的任务。",
+@@ -4805,6 +4811,7 @@
+     "Updated a redemption code": "更新了一个兑换码",
+     "Updated a subscription plan": "更新了一个订阅计划",
+     "Updated a vendor": "更新了一个供应商",
++    "Updated At": "更新时间",
+     "Updated channel {{name}} (ID: {{id}})": "更新渠道 {{name}}（ID: {{id}}）",
+     "Updated daily": "每日更新",
+     "Updated successfully": "更新成功",
+@@ -5000,6 +5007,7 @@
+     "View all currently available models": "查看当前可用的所有模型",
+     "View channel lists and details without secrets.": "查看不含密钥的渠道列表和详情。",
+     "View channel secrets": "查看渠道密钥",
++    "View complete task metadata and upstream response": "查看完整任务元数据和上游响应",
+     "View detailed information about this user including balance, usage statistics, and invitation details.": "查看此用户的详细信息，包括余额、使用统计和邀请详情。",
+     "View details": "查看详情",
+     "View document": "查看文档",
+@@ -5008,6 +5016,7 @@
+     "View mode": "视图模式",
+     "View model statistics and charts": "查看模型统计和图表",
+     "View Pricing": "查看定价",
++    "View Task Details": "查看任务详情",
+     "View the complete details for this": "查看此条",
+     "View the complete details for this log entry": "查看此日志条目的完整详情",
+     "View the complete error message and details": "查看完整错误信息与详情",
