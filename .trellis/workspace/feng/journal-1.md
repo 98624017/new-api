@@ -77,3 +77,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: 完成任务日志详情与发布约束
+
+**Date**: 2026-07-21
+**Task**: 完成任务日志详情与发布约束
+**Branch**: `main`
+
+### Summary
+
+增强 Default 任务日志详情弹窗并同步本地补丁；固化 GHCR 手动发布仅使用 main 的约束。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5b404b576` | (see git log) |
+| `438ecd423` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
