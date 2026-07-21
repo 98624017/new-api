@@ -27,7 +27,9 @@
 ## 3. 影响范围
 
 - `.github/workflows/docker-image-manual-ghcr.yml`
-  - 保留手动 GHCR Docker 构建流程。
+  - 保留手动 GHCR Docker 构建流程，并固定只从当前仓库 `main` 的完整提交 SHA 构建与更新 `latest`。
+  - 非 `main` workflow 上下文直接失败；发布前运行 API Key 自助兑换回归，避免上游标签或缺失核心定制的提交覆盖生产镜像。
+  - 多次手动发布串行执行，避免两个多架构 manifest 交错覆盖 `latest`。
 - `.github/workflows/sync-upstream.yml`
   - 保留上游同步 workflow。
   - workflow 运行时先暂存 `patches/` 和 `docs/customizations/`，再从 `upstream/<branch>` 创建同步分支、应用补丁并恢复登记文件。
@@ -37,7 +39,7 @@
 - 上游 Docker workflow
   - 目标上游已经通过 `docker-build.yml` 和 `docker-image-branch.yml` 提供原生 amd64/arm64 多架构构建；旧的独立 alpha/arm64 workflow 不再恢复。
 - `.gitignore`
-  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify`、Playwright CLI 证据目录和 `meituapi/` 等本地验证/素材产物。
+  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify`、Playwright CLI 与 gstack 目录、`meituapi/`、本地 API 参考文件和 Nginx 排障文档等验证/素材产物。
 - `AGENTS.md`
   - 保留项目内 agent 工作约定。
 - `README.md` / `README.zh_CN.md`
@@ -62,6 +64,7 @@
 ## 4. 风险点
 
 - 该补丁覆盖项目维护文件，后续上游同步时容易与 CI、README、构建脚本变更冲突。
+- GHCR 手动构建只允许发布当前仓库 `main`；需要验证其他 ref 时应使用不更新生产 `latest` 的独立流程，不能放宽此工作流。
 - `scripts/verify_patches.sh` 默认基准锁定为当前项目使用的原版 new-api commit，切换上游基准时需显式设置 `PATCH_BASE_REF`。
 - patch 重放树必须与当前集成树中的所有 patch 所属文件逐字一致；新增源文件遗漏会直接失败。
 - Go 主程序通过 `embed` 依赖两套前端产物，因此验证顺序必须先构建前端，再执行 `go build ./...`。

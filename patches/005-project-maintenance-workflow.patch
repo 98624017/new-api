@@ -1,28 +1,22 @@
 diff --git a/.github/workflows/docker-image-manual-ghcr.yml b/.github/workflows/docker-image-manual-ghcr.yml
 new file mode 100644
-index 000000000..29e9d5b1c
+index 000000000..81af21cd0
 --- /dev/null
 +++ b/.github/workflows/docker-image-manual-ghcr.yml
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,185 @@
 +name: Publish Docker image (manual GHCR)
 +
 +on:
 +  workflow_dispatch:
 +    inputs:
-+      ref:
-+        description: "Git ref to build (branch, tag, or commit SHA)"
-+        required: false
-+        default: "main"
-+        type: string
-+      push_latest:
-+        description: "Also update ghcr latest tag"
-+        required: false
-+        default: true
-+        type: boolean
 +      reason:
 +        description: "Optional reason for this manual build"
 +        required: false
 +        type: string
++
++concurrency:
++  group: manual-ghcr-main-publish
++  cancel-in-progress: false
 +
 +jobs:
 +  prepare:
@@ -31,34 +25,54 @@ index 000000000..29e9d5b1c
 +    permissions:
 +      contents: read
 +    outputs:
-+      ref: ${{ steps.prepare.outputs.ref }}
++      main_sha: ${{ steps.prepare.outputs.main_sha }}
 +      tag: ${{ steps.prepare.outputs.tag }}
 +      ghcr_repository: ${{ steps.prepare.outputs.ghcr_repository }}
 +    steps:
-+      - name: Check out target ref
++      - name: Enforce main branch context
++        env:
++          WORKFLOW_REF: ${{ github.ref }}
++        run: |
++          if [ "$WORKFLOW_REF" != "refs/heads/main" ]; then
++            echo "::error::This workflow only publishes refs/heads/main; got ${WORKFLOW_REF}"
++            exit 1
++          fi
++
++      - name: Check out repository main
 +        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 +        with:
 +          fetch-depth: 1
-+          ref: ${{ inputs.ref || 'main' }}
++          repository: ${{ github.repository }}
++          ref: refs/heads/main
++
++      - name: Set up Go
++        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
++        with:
++          go-version-file: go.mod
++          cache: true
++
++      - name: Verify API Key self-service customization
++        run: go test ./controller -run '^TestTokenRedeem_' -count=1
 +
 +      - name: Resolve manual tag
 +        id: prepare
 +        run: |
-+          REF_NAME="${{ inputs.ref || 'main' }}"
-+          SHORT_SHA="$(git rev-parse --short HEAD)"
++          MAIN_SHA="$(git rev-parse HEAD)"
++          SHORT_SHA="$(git rev-parse --short "$MAIN_SHA")"
 +          TAG="manual-$(date +'%Y%m%d')-${SHORT_SHA}"
 +          GHCR_REPOSITORY="${GITHUB_REPOSITORY,,}"
 +
-+          echo "ref=${REF_NAME}" >> "$GITHUB_OUTPUT"
++          echo "main_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
 +          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 +          echo "ghcr_repository=${GHCR_REPOSITORY}" >> "$GITHUB_OUTPUT"
 +
 +          {
 +            echo "### Manual GHCR Docker Build"
 +            echo ""
-+            echo "- Ref: \`${REF_NAME}\`"
++            echo "- Source: \`${GITHUB_REPOSITORY}@${MAIN_SHA}\`"
++            echo "- Branch: \`main\`"
 +            echo "- Tag: \`${TAG}\`"
-+            echo "- Push latest: \`${{ inputs.push_latest }}\`"
++            echo "- Push latest: \`true\`"
 +            if [ -n "${{ inputs.reason }}" ]; then
 +              echo "- Reason: ${{ inputs.reason }}"
 +            fi
@@ -83,11 +97,12 @@ index 000000000..29e9d5b1c
 +      contents: read
 +      id-token: write
 +    steps:
-+      - name: Check out target ref
++      - name: Check out prepared main commit
 +        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 +        with:
 +          fetch-depth: 1
-+          ref: ${{ needs.prepare.outputs.ref }}
++          repository: ${{ github.repository }}
++          ref: ${{ needs.prepare.outputs.main_sha }}
 +
 +      - name: Write VERSION for Docker build
 +        run: echo "${{ needs.prepare.outputs.tag }}" > VERSION
@@ -160,7 +175,6 @@ index 000000000..29e9d5b1c
 +            ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }}-arm64
 +
 +      - name: Create & push manifest (latest)
-+        if: ${{ inputs.push_latest }}
 +        run: |
 +          docker buildx imagetools create \
 +            -t ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest \
@@ -172,10 +186,8 @@ index 000000000..29e9d5b1c
 +          echo "### Multi-arch Manifest" >> "$GITHUB_STEP_SUMMARY"
 +          echo '```' >> "$GITHUB_STEP_SUMMARY"
 +          docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:${{ needs.prepare.outputs.tag }} >> "$GITHUB_STEP_SUMMARY"
-+          if [ "${{ inputs.push_latest }}" = "true" ]; then
-+            echo "---" >> "$GITHUB_STEP_SUMMARY"
-+            docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest >> "$GITHUB_STEP_SUMMARY"
-+          fi
++          echo "---" >> "$GITHUB_STEP_SUMMARY"
++          docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.ghcr_repository }}:latest >> "$GITHUB_STEP_SUMMARY"
 +          echo '```' >> "$GITHUB_STEP_SUMMARY"
 diff --git a/.github/workflows/electron-build.yml b/.github/workflows/electron-build.yml
 deleted file mode 100644
@@ -556,10 +568,10 @@ index 000000000..38c386020
 +          echo "" >> $GITHUB_STEP_SUMMARY
 +          echo "To actually sync, re-run this workflow with **dry_run = false**." >> $GITHUB_STEP_SUMMARY
 diff --git a/.gitignore b/.gitignore
-index c3afceb02..53ba80534 100644
+index c3afceb02..8141fea5d 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -32,8 +32,15 @@ data/
+@@ -32,12 +32,22 @@ data/
  .gomodcache/
  .gocache-temp
  .gopath
@@ -571,11 +583,18 @@ index c3afceb02..53ba80534 100644
 +# local generated verification/artifact outputs
 +.tmp-newapi-verify
 +meituapi/
++API-Reference 1.7.1.md
++docs/installation/nginx-upstream-failover.md
 +.test
  skills-lock.json
  .playwright-mcp
 +.playwright-cli/
  
+ # Local-only live probes and scratch test workspaces.
+ .local-tests/
+ service/relayconvert/chat_responses_live_local_test.go
+ service/openaicompat/chat_responses_live_local_test.go
++.gstack/
 diff --git a/AGENTS.md b/AGENTS.md
 index 8f41dcf72..83f9dd6c0 100644
 --- a/AGENTS.md
