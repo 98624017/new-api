@@ -251,7 +251,7 @@ if (validPage !== page) {
 
 #### 3. Contracts
 
-- Applying `patches/001-*.patch` through `patches/011-*.patch` to `PATCH_BASE_REF` must reproduce every patch-owned path byte for byte from the integration tree.
+- Applying `patches/001-*.patch` through `patches/012-*.patch` to `PATCH_BASE_REF` must reproduce every patch-owned path byte for byte from the integration tree.
 - Patch application alone is not success. The replay tree must install locked Bun dependencies, test shared frontend state, build both frontends, compile Go, and run customization regressions.
 - `web/classic` must explicitly pin `date-fns@2.30.0` and `date-fns-tz@1.3.8` while `web/default` uses its newer dependency line. Do not rely on Bun workspace hoisting to select a compatible transitive version.
 - Both frontend builds may run in parallel, but `go build ./...` must wait for both because Go `embed` consumes both output trees.
@@ -277,7 +277,7 @@ if (validPage !== page) {
 
 - Run `make verify-patches` under an outer 120-second timeout.
 - Assert all numbered patches apply in order and replay-owned paths equal the integration tree.
-- Run `web/shared/frontend-lock.test.ts`, `web/default/src/lib/frontend-cache.test.ts`, and `web/classic/src/services/channel.test.js`; assert the shared unlock survives default cache initialization and Classic uses the dedicated channel-status endpoint.
+- Run `web/shared/frontend-lock.test.ts`, `web/default/src/lib/frontend-cache.test.ts`, `web/classic/src/services/channel.test.js`, and `common/totp_test.go`; assert the shared unlock survives default cache initialization, Classic uses the dedicated channel-status endpoint, and backup-code generation retains its quantity, visible format, and batch-uniqueness contract.
 - Build `web/default` and `web/classic`, then run `go build ./...`.
 - Run the numbered customization regression groups and assert every background job exit status is collected.
 

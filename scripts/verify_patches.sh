@@ -169,8 +169,8 @@ test_pids=()
 run_replay_check "验证 001/008 API Key 自助与任务接口" \
   go test ./controller -run '(TokenRedeem|GetUserTokenTask|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
 test_pids+=("$!")
-run_replay_check "验证 002/003 退款开关与金额脱敏" \
-  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts)' -count=1 &
+run_replay_check "验证 002/003/012 退款、金额脱敏与备用码" \
+  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes)' -count=1 &
 test_pids+=("$!")
 run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
   go test ./relay/channel/task/sora -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &

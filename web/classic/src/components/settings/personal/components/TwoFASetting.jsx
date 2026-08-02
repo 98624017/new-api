@@ -216,22 +216,24 @@ const TwoFASetting = ({ t }) => {
             </Text>
           </div>
 
-          <div className='grid grid-cols-1 sm:grid-cols-2 gap-2'>
-            {codes.map((code, index) => (
-              <div key={index} className='rounded-lg p-3'>
-                <div className='flex items-center justify-between'>
-                  <Text
-                    code
-                    className='text-sm font-mono text-slate-700 dark:text-slate-200'
-                  >
-                    {code}
-                  </Text>
-                  <Text type='quaternary' className='text-xs'>
-                    #{(index + 1).toString().padStart(2, '0')}
-                  </Text>
+          <div className='max-h-72 overflow-y-auto pr-1'>
+            <div className='grid grid-cols-1 gap-2 sm:grid-cols-2'>
+              {codes.map((code, index) => (
+                <div key={index} className='rounded-lg p-3'>
+                  <div className='flex items-center justify-between'>
+                    <Text
+                      code
+                      className='text-sm font-mono text-slate-700 dark:text-slate-200'
+                    >
+                      {code}
+                    </Text>
+                    <Text type='quaternary' className='text-xs'>
+                      #{(index + 1).toString().padStart(2, '0')}
+                    </Text>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
 
           <Divider margin={12} />

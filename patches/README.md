@@ -645,6 +645,50 @@ make verify-patches
 
 ---
 
+## 012-2fa-twenty-backup-codes.patch
+
+**功能**：两步验证每次初始化或主动重新生成备用码时返回 20 个互不重复的一次性代码，并使两套前端在受限高度内完整展示。
+
+**背景**：上游默认每次只生成 4 个备用码，无法满足多次紧急恢复的使用场景。本地继续使用现有的 bcrypt 哈希、一行一码与一码一用合同，不引入数据库迁移或多次使用计数。
+
+**涉及文件（6 个）**：
+
+### 1. `common/totp.go`
+
+将备用码数量调整为 20，并在单批生成时排除极低概率的随机碰撞。
+
+### 2. `common/totp_test.go`
+
+覆盖数量、`XXXX-XXXX` 格式和规范化后的批次唯一性合同。
+
+### 3. `web/default/src/features/profile/components/dialogs/two-fa-backup-dialog.tsx`
+
+重新生成弹窗的代码列表改为移动端单列、桌面端双列，并仅在代码区域内滚动。
+
+### 4. `web/default/src/features/profile/components/dialogs/two-fa-setup-dialog.tsx`
+
+应用同样的响应式布局与内部滚动，保持警告和复制全部操作可见。
+
+### 5. `web/classic/src/components/settings/personal/components/TwoFASetting.jsx`
+
+保留已有的响应式双列布局，为备用码网格增加受限高度与内部滚动。
+
+### 6. `scripts/verify_patches.sh`
+
+将备用码生成回归测试并入现有 `common` 包测试组，避免同一包并行执行。
+
+### 回归验证
+
+```bash
+go test ./common -run '^TestGenerateBackupCodes$' -count=1
+bun run --cwd web/default typecheck
+bun run --cwd web/default build
+bun run --cwd web/classic build
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列

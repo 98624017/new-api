@@ -13,8 +13,8 @@ import (
 
 const (
 	// 备用码配置
-	BackupCodeLength = 8 // 备用码长度
-	BackupCodeCount  = 4 // 生成备用码数量
+	BackupCodeLength = 8  // 备用码长度
+	BackupCodeCount  = 20 // 生成备用码数量
 
 	// 限制配置
 	MaxFailAttempts = 5   // 最大失败尝试次数
@@ -47,14 +47,19 @@ func ValidateTOTPCode(secret, code string) bool {
 
 // GenerateBackupCodes 生成备用恢复码
 func GenerateBackupCodes() ([]string, error) {
-	codes := make([]string, BackupCodeCount)
+	codes := make([]string, 0, BackupCodeCount)
+	seen := make(map[string]struct{}, BackupCodeCount)
 
-	for i := 0; i < BackupCodeCount; i++ {
+	for len(codes) < BackupCodeCount {
 		code, err := generateRandomBackupCode()
 		if err != nil {
 			return nil, err
 		}
-		codes[i] = code
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		codes = append(codes, code)
 	}
 
 	return codes, nil
