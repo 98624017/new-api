@@ -111,3 +111,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: 修复 Classic 渠道状态切换与分页回退
+
+**Date**: 2026-08-02
+**Task**: 修复 Classic 渠道状态切换与分页回退
+**Branch**: `main`
+
+### Summary
+
+修复 Classic 渠道启停接口和筛选结果分页越界，停止挂载维护横幅，并同步 011 customization、回归测试与补丁重放门禁。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `83947f755` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
