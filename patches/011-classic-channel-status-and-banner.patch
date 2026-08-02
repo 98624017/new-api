@@ -1,0 +1,583 @@
+scripts/verify_patches.sh                          |  6 ++-
+ web/classic/src/components/layout/PageLayout.jsx   |  2 -
+ .../src/hooks/channels/channelPagination.js        | 23 +++++++++
+ .../src/hooks/channels/channelPagination.test.js   | 33 +++++++++++++
+ web/classic/src/hooks/channels/useChannelsData.jsx | 57 +++++++++++++++++-----
+ web/classic/src/services/channel.js                | 23 +++++++++
+ web/classic/src/services/channel.test.js           | 49 +++++++++++++++++++
+ 7 files changed, 177 insertions(+), 16 deletions(-)
+
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+index 406b52997..111d44960 100644
+--- a/scripts/verify_patches.sh
++++ b/scripts/verify_patches.sh
+@@ -149,10 +149,12 @@ wait_for_checks() {
+ 
+ command -v bun >/dev/null 2>&1 || fail "未找到 bun，无法验证双前端补丁"
+ run_replay_check "安装 patch 重放树的前端依赖" bun install --cwd web --frozen-lockfile
+-run_replay_check "验证 006/010 前端定制逻辑" bun test \
++run_replay_check "验证 006/010/011 前端定制逻辑" bun test \
+   web/shared/frontend-lock.test.ts \
+   web/default/src/lib/frontend-cache.test.ts \
+-  web/default/src/features/usage-logs/lib/task-details.test.ts
++  web/default/src/features/usage-logs/lib/task-details.test.ts \
++  web/classic/src/hooks/channels/channelPagination.test.js \
++  web/classic/src/services/channel.test.js
+ 
+ build_pids=()
+ run_replay_check "编译 default 前端" bun run --cwd web/default build:check &
+diff --git a/web/classic/src/components/layout/PageLayout.jsx b/web/classic/src/components/layout/PageLayout.jsx
+index b7b10797d..962a22e43 100644
+--- a/web/classic/src/components/layout/PageLayout.jsx
++++ b/web/classic/src/components/layout/PageLayout.jsx
+@@ -22,7 +22,6 @@ import { Layout } from '@douyinfe/semi-ui';
+ import SiderBar from './SiderBar';
+ import App from '../../App';
+ import FooterBar from './Footer';
+-import ClassicFrontendDeprecationBanner from './ClassicFrontendDeprecationBanner';
+ import { ToastContainer } from 'react-toastify';
+ import ErrorBoundary from '../common/ErrorBoundary';
+ import React, { useContext, useEffect, useState } from 'react';
+@@ -212,7 +211,6 @@ const PageLayout = () => {
+             minHeight: 0,
+           }}
+         >
+-          <ClassicFrontendDeprecationBanner />
+           <Content
+             className={isFixedLayout ? undefined : 'public-page-content'}
+             style={{
+diff --git a/web/classic/src/hooks/channels/channelPagination.js b/web/classic/src/hooks/channels/channelPagination.js
+new file mode 100644
+index 000000000..ca3629173
+--- /dev/null
++++ b/web/classic/src/hooks/channels/channelPagination.js
+@@ -0,0 +1,23 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++export const getValidChannelPage = (requestedPage, total, pageSize) => {
++  const lastPage = Math.max(1, Math.ceil(total / pageSize));
++  return Math.min(Math.max(1, requestedPage), lastPage);
++};
+diff --git a/web/classic/src/hooks/channels/channelPagination.test.js b/web/classic/src/hooks/channels/channelPagination.test.js
+new file mode 100644
+index 000000000..cee0017e8
+--- /dev/null
++++ b/web/classic/src/hooks/channels/channelPagination.test.js
+@@ -0,0 +1,33 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { describe, expect, test } from 'bun:test';
++import { getValidChannelPage } from './channelPagination';
++
++describe('classic channel pagination', () => {
++  test.each([
++    ['keeps the requested page when it remains valid', 3, 21, 10, 3],
++    ['uses the new last page after the total shrinks', 2, 10, 10, 1],
++    ['uses the first page for an empty result', 4, 0, 10, 1],
++  ])('%s', (_, requestedPage, total, pageSize, expectedPage) => {
++    expect(getValidChannelPage(requestedPage, total, pageSize)).toBe(
++      expectedPage,
++    );
++  });
++});
+diff --git a/web/classic/src/hooks/channels/useChannelsData.jsx b/web/classic/src/hooks/channels/useChannelsData.jsx
+index e0208683f..4dc76d062 100644
+--- a/web/classic/src/hooks/channels/useChannelsData.jsx
++++ b/web/classic/src/hooks/channels/useChannelsData.jsx
+@@ -37,8 +37,10 @@ import { useIsMobile } from '../common/useIsMobile';
+ import { useTableCompactMode } from '../common/useTableCompactMode';
+ import { useChannelUpstreamUpdates } from './useChannelUpstreamUpdates';
+ import { parseUpstreamUpdateMeta } from './upstreamUpdateUtils';
++import { getValidChannelPage } from './channelPagination';
+ import { Modal, Button } from '@douyinfe/semi-ui';
+ import { openCodexUsageModal } from '../../components/table/channels/modals/CodexUsageModal';
++import { updateChannelStatus } from '../../services/channel';
+ 
+ export const useChannelsData = () => {
+   const { t } = useTranslation();
+@@ -357,6 +359,21 @@ export const useChannelsData = () => {
+     const { success, message, data } = res.data;
+     if (success) {
+       const { items, total, type_counts } = data;
++      const validPage = getValidChannelPage(page, total, pageSize);
++      if (validPage !== page) {
++        setActivePage(validPage);
++        if (total > 0) {
++          await loadChannels(
++            validPage,
++            pageSize,
++            idSort,
++            enableTagMode,
++            typeKey,
++            statusF,
++          );
++          return;
++        }
++      }
+       if (type_counts) {
+         const sumAll = Object.values(type_counts).reduce(
+           (acc, v) => acc + v,
+@@ -404,6 +421,21 @@ export const useChannelsData = () => {
+       const { success, message, data } = res.data;
+       if (success) {
+         const { items = [], total = 0, type_counts = {} } = data;
++        const validPage = getValidChannelPage(page, total, pageSz);
++        if (validPage !== page) {
++          setActivePage(validPage);
++          if (total > 0) {
++            await searchChannels(
++              enableTagMode,
++              typeKey,
++              statusF,
++              validPage,
++              pageSz,
++              sortFlag,
++            );
++            return;
++          }
++        }
+         const sumAll = Object.values(type_counts).reduce(
+           (acc, v) => acc + v,
+           0,
+@@ -411,7 +443,7 @@ export const useChannelsData = () => {
+         setTypeCounts({ ...type_counts, all: sumAll });
+         setChannelFormat(items, enableTagMode);
+         setChannelCount(total);
+-        setActivePage(page);
++        setActivePage(validPage);
+       } else {
+         showError(message);
+       }
+@@ -448,12 +480,10 @@ export const useChannelsData = () => {
+         res = await API.delete(`/api/channel/${id}/`);
+         break;
+       case 'enable':
+-        data.status = 1;
+-        res = await API.put('/api/channel/', data);
++        res = await updateChannelStatus(id, 1);
+         break;
+       case 'disable':
+-        data.status = 2;
+-        res = await API.put('/api/channel/', data);
++        res = await updateChannelStatus(id, 2);
+         break;
+       case 'priority':
+         if (value === '') return;
+@@ -467,20 +497,23 @@ export const useChannelsData = () => {
+         res = await API.put('/api/channel/', data);
+         break;
+       case 'enable_all':
+-        data.channel_info = record.channel_info;
+-        data.channel_info.multi_key_status_list = {};
++        data.channel_info = {
++          ...record.channel_info,
++          multi_key_status_list: {},
++        };
+         res = await API.put('/api/channel/', data);
+         break;
+     }
+     const { success, message } = res.data;
+     if (success) {
+       showSuccess(t('操作成功完成！'));
+-      let channel = res.data.data;
+-      let newChannels = [...channels];
+-      if (action !== 'delete') {
+-        record.status = channel.status;
++      if (
++        action === 'enable' ||
++        action === 'disable' ||
++        action === 'enable_all'
++      ) {
++        await refresh();
+       }
+-      setChannels(newChannels);
+     } else {
+       showError(message);
+     }
+diff --git a/web/classic/src/services/channel.js b/web/classic/src/services/channel.js
+new file mode 100644
+index 000000000..36ba78adf
+--- /dev/null
++++ b/web/classic/src/services/channel.js
+@@ -0,0 +1,23 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { API } from '../helpers';
++
++export const updateChannelStatus = (id, status) =>
++  API.post(`/api/channel/${id}/status`, { status });
+diff --git a/web/classic/src/services/channel.test.js b/web/classic/src/services/channel.test.js
+new file mode 100644
+index 000000000..b2207a90f
+--- /dev/null
++++ b/web/classic/src/services/channel.test.js
+@@ -0,0 +1,49 @@
++/*
++Copyright (C) 2025 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
++
++const post = mock(async () => ({ data: { success: true } }));
++
++mock.module('../helpers', () => ({
++  API: { post },
++}));
++
++let updateChannelStatus;
++
++describe('classic channel status API', () => {
++  beforeAll(async () => {
++    ({ updateChannelStatus } = await import('./channel'));
++  });
++
++  beforeEach(() => {
++    post.mockClear();
++  });
++
++  test.each([
++    ['enable', 1],
++    ['disable', 2],
++  ])('uses the dedicated endpoint to %s a channel', async (_, status) => {
++    const response = await updateChannelStatus(42, status);
++
++    expect(response).toEqual({ data: { success: true } });
++    expect(post).toHaveBeenCalledTimes(1);
++    expect(post).toHaveBeenCalledWith('/api/channel/42/status', { status });
++  });
++});
+
+Changes:
+
+scripts/verify_patches.sh
+  @@ -149,10 +149,12 @@ wait_for_checks() {
+  -run_replay_check "验证 006/010 前端定制逻辑" bun test \
+  +run_replay_check "验证 006/010/011 前端定制逻辑" bun test \
+     web/shared/frontend-lock.test.ts \
+     web/default/src/lib/frontend-cache.test.ts \
+  -  web/default/src/features/usage-logs/lib/task-details.test.ts
+  +  web/default/src/features/usage-logs/lib/task-details.test.ts \
+  +  web/classic/src/hooks/channels/channelPagination.test.js \
+  +  web/classic/src/services/channel.test.js
+   
+   build_pids=()
+   run_replay_check "编译 default 前端" bun run --cwd web/default build:check &
+  +4 -2
+
+web/classic/src/components/layout/PageLayout.jsx
+  @@ -22,7 +22,6 @@ import { Layout } from '@douyinfe/semi-ui';
+  -import ClassicFrontendDeprecationBanner from './ClassicFrontendDeprecationBanner';
+   import { ToastContainer } from 'react-toastify';
+   import ErrorBoundary from '../common/ErrorBoundary';
+   import React, { useContext, useEffect, useState } from 'react';
+  @@ -212,7 +211,6 @@ const PageLayout = () => {
+  -          <ClassicFrontendDeprecationBanner />
+             <Content
+               className={isFixedLayout ? undefined : 'public-page-content'}
+               style={{
+  +0 -2
+
+web/classic/src/hooks/channels/channelPagination.js
+  @@ -0,0 +1,23 @@
+  +/*
+  +Copyright (C) 2025 QuantumNous
+  +
+  +This program is free software: you can redistribute it and/or modify
+  +it under the terms of the GNU Affero General Public License as
+  +published by the Free Software Foundation, either version 3 of the
+  +License, or (at your option) any later version.
+  +
+  +This program is distributed in the hope that it will be useful,
+  +but WITHOUT ANY WARRANTY; without even the implied warranty of
+  +MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  +GNU Affero General Public License for more details.
+  +
+  +You should have received a copy of the GNU Affero General Public License
+  +along with this program. If not, see <https://www.gnu.org/licenses/>.
+  +
+  +For commercial licensing, please contact support@quantumnous.com
+  +*/
+  +
+  +export const getValidChannelPage = (requestedPage, total, pageSize) => {
+  +  const lastPage = Math.max(1, Math.ceil(total / pageSize));
+  +  return Math.min(Math.max(1, requestedPage), lastPage);
+  +};
+  +23 -0
+
+web/classic/src/hooks/channels/channelPagination.test.js
+  @@ -0,0 +1,33 @@
+  +/*
+  +Copyright (C) 2025 QuantumNous
+  +
+  +This program is free software: you can redistribute it and/or modify
+  +it under the terms of the GNU Affero General Public License as
+  +published by the Free Software Foundation, either version 3 of the
+  +License, or (at your option) any later version.
+  +
+  +This program is distributed in the hope that it will be useful,
+  +but WITHOUT ANY WARRANTY; without even the implied warranty of
+  +MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  +GNU Affero General Public License for more details.
+  +
+  +You should have received a copy of the GNU Affero General Public License
+  +along with this program. If not, see <https://www.gnu.org/licenses/>.
+  +
+  +For commercial licensing, please contact support@quantumnous.com
+  +*/
+  +
+  +import { describe, expect, test } from 'bun:test';
+  +import { getValidChannelPage } from './channelPagination';
+  +
+  +describe('classic channel pagination', () => {
+  +  test.each([
+  +    ['keeps the requested page when it remains valid', 3, 21, 10, 3],
+  +    ['uses the new last page after the total shrinks', 2, 10, 10, 1],
+  +    ['uses the first page for an empty result', 4, 0, 10, 1],
+  +  ])('%s', (_, requestedPage, total, pageSize, expectedPage) => {
+  +    expect(getValidChannelPage(requestedPage, total, pageSize)).toBe(
+  +      expectedPage,
+  +    );
+  +  });
+  +});
+  +33 -0
+
+web/classic/src/hooks/channels/useChannelsData.jsx
+  @@ -37,8 +37,10 @@ import { useIsMobile } from '../common/useIsMobile';
+  +import { getValidChannelPage } from './channelPagination';
+   import { Modal, Button } from '@douyinfe/semi-ui';
+   import { openCodexUsageModal } from '../../components/table/channels/modals/CodexUsageModal';
+  +import { updateChannelStatus } from '../../services/channel';
+   
+   export const useChannelsData = () => {
+     const { t } = useTranslation();
+  @@ -357,6 +359,21 @@ export const useChannelsData = () => {
+  +      const validPage = getValidChannelPage(page, total, pageSize);
+  +      if (validPage !== page) {
+  +        setActivePage(validPage);
+  +        if (total > 0) {
+  +          await loadChannels(
+  +            validPage,
+  +            pageSize,
+  +            idSort,
+  +            enableTagMode,
+  +            typeKey,
+  +            statusF,
+  +          );
+  +          return;
+  +        }
+  +      }
+         if (type_counts) {
+           const sumAll = Object.values(type_counts).reduce(
+             (acc, v) => acc + v,
+  @@ -404,6 +421,21 @@ export const useChannelsData = () => {
+  +        const validPage = getValidChannelPage(page, total, pageSz);
+  +        if (validPage !== page) {
+  +          setActivePage(validPage);
+  +          if (total > 0) {
+  +            await searchChannels(
+  +              enableTagMode,
+  +              typeKey,
+  +              statusF,
+  +              validPage,
+  +              pageSz,
+  +              sortFlag,
+  +            );
+  +            return;
+  +          }
+  +        }
+           const sumAll = Object.values(type_counts).reduce(
+             (acc, v) => acc + v,
+             0,
+  @@ -411,7 +443,7 @@ export const useChannelsData = () => {
+  -        setActivePage(page);
+  +        setActivePage(validPage);
+         } else {
+           showError(message);
+         }
+  @@ -448,12 +480,10 @@ export const useChannelsData = () => {
+  -        data.status = 1;
+  -        res = await API.put('/api/channel/', data);
+  +        res = await updateChannelStatus(id, 1);
+           break;
+         case 'disable':
+  -        data.status = 2;
+  -        res = await API.put('/api/channel/', data);
+  +        res = await updateChannelStatus(id, 2);
+           break;
+         case 'priority':
+           if (value === '') return;
+  @@ -467,20 +497,23 @@ export const useChannelsData = () => {
+  -        data.channel_info = record.channel_info;
+  -        data.channel_info.multi_key_status_list = {};
+  +        data.channel_info = {
+  +          ...record.channel_info,
+  +          multi_key_status_list: {},
+  +        };
+           res = await API.put('/api/channel/', data);
+           break;
+       }
+       const { success, message } = res.data;
+       if (success) {
+         showSuccess(t('操作成功完成！'));
+  -      let channel = res.data.data;
+  -      let newChannels = [...channels];
+  -      if (action !== 'delete') {
+  -        record.status = channel.status;
+  +      if (
+  +        action === 'enable' ||
+  +        action === 'disable' ||
+  +        action === 'enable_all'
+  +      ) {
+  +        await refresh();
+         }
+  -      setChannels(newChannels);
+       } else {
+         showError(message);
+       }
+  +45 -12
+
+web/classic/src/services/channel.js
+  @@ -0,0 +1,23 @@
+  +/*
+  +Copyright (C) 2025 QuantumNous
+  +
+  +This program is free software: you can redistribute it and/or modify
+  +it under the terms of the GNU Affero General Public License as
+  +published by the Free Software Foundation, either version 3 of the
+  +License, or (at your option) any later version.
+  +
+  +This program is distributed in the hope that it will be useful,
+  +but WITHOUT ANY WARRANTY; without even the implied warranty of
+  +MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  +GNU Affero General Public License for more details.
+  +
+  +You should have received a copy of the GNU Affero General Public License
+  +along with this program. If not, see <https://www.gnu.org/licenses/>.
+  +
+  +For commercial licensing, please contact support@quantumnous.com
+  +*/
+  +
+  +import { API } from '../helpers';
+  +
+  +export const updateChannelStatus = (id, status) =>
+  +  API.post(`/api/channel/${id}/status`, { status });
+  +23 -0
+
+web/classic/src/services/channel.test.js
+  @@ -0,0 +1,49 @@
+  +/*
+  +Copyright (C) 2025 QuantumNous
+  +
+  +This program is free software: you can redistribute it and/or modify
+  +it under the terms of the GNU Affero General Public License as
+  +published by the Free Software Foundation, either version 3 of the
+  +License, or (at your option) any later version.
+  +
+  +This program is distributed in the hope that it will be useful,
+  +but WITHOUT ANY WARRANTY; without even the implied warranty of
+  +MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  +GNU Affero General Public License for more details.
+  +
+  +You should have received a copy of the GNU Affero General Public License
+  +along with this program. If not, see <https://www.gnu.org/licenses/>.
+  +
+  +For commercial licensing, please contact support@quantumnous.com
+  +*/
+  +
+  +import { beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+  +
+  +const post = mock(async () => ({ data: { success: true } }));
+  +
+  +mock.module('../helpers', () => ({
+  +  API: { post },
+  +}));
+  +
+  +let updateChannelStatus;
+  +
+  +describe('classic channel status API', () => {
+  +  beforeAll(async () => {
+  +    ({ updateChannelStatus } = await import('./channel'));
+  +  });
+  +
+  +  beforeEach(() => {
+  +    post.mockClear();
+  +  });
+  +
+  +  test.each([
+  +    ['enable', 1],
+  +    ['disable', 2],
+  +  ])('uses the dedicated endpoint to %s a channel', async (_, status) => {
+  +    const response = await updateChannelStatus(42, status);
+  +
+  +    expect(response).toEqual({ data: { success: true } });
+  +    expect(post).toHaveBeenCalledTimes(1);
+  +    expect(post).toHaveBeenCalledWith('/api/channel/42/status', { status });
+  +  });
+  +});
+  +49 -0

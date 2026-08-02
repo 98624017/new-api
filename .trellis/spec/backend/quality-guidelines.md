@@ -153,6 +153,81 @@ const isFailed = Boolean(failureReason)
 
 ---
 
+### Scenario: Dual Frontend Operational Mutation Contracts
+
+#### 1. Scope / Trigger
+
+- Trigger: a backend write operation is moved from a generic resource-edit endpoint to a dedicated operational endpoint or permission.
+- Applies when `web/default` and `web/classic` both expose the affected operation, even if one frontend is deprecated upstream but remains embedded locally.
+
+#### 2. Signatures
+
+- Generic channel edit: `PUT /api/channel/`; request data must not contain `status`.
+- Single channel status mutation: `POST /api/channel/:id/status` with `{ "status": 1 | 2 }`.
+- Default wrapper: `web/default/src/features/channels/api.ts::updateChannelStatus`.
+- Classic wrapper: `web/classic/src/services/channel.js::updateChannelStatus`.
+- Classic page normalizer: `getValidChannelPage(requestedPage, total, pageSize)`.
+
+#### 3. Contracts
+
+- Status `1` means enabled and status `2` means manually disabled; auto-disabled status is not a valid manual mutation target.
+- The generic edit endpoint rejects a request that contains `status`; callers must not rely on partial model updates for operational state.
+- Both embedded frontends must migrate in the same change when a shared backend write contract changes.
+- The status endpoint response `data` is a change flag, not a channel object. Frontends must not read `data.status` from it.
+- After a successful status mutation, views with server-side filters or grouped rows must refresh from the server instead of mutating a caller-owned row object.
+- A filtered refresh must normalize its controlled page to `min(max(1, requestedPage), max(1, ceil(total / pageSize)))`. If a non-empty result moved to an earlier last page, reload that page; if `total` is zero, render an empty first page without another request.
+- Apply the same page normalization to both ordinary list and search endpoints so a status mutation cannot leave either view on an out-of-range page.
+
+#### 4. Validation & Error Matrix
+
+- `PUT /api/channel/` with `status` -> business failure with invalid parameters; persisted status remains unchanged.
+- `POST /api/channel/:id/status` with status `1` or `2` -> success; cache and proxy-client state are refreshed by the backend.
+- Status endpoint with status `0`, `3`, or malformed JSON -> invalid parameters.
+- Status API business failure -> frontend displays the backend message and keeps the current list state.
+- Status API success -> frontend reloads the active pagination, search, type, and status-filter query.
+- Filtered total shrinks from 11 to 10 at page size 10 while page 2 is active -> set page 1 and reload page 1.
+- Filtered total becomes 0 while any later page is active -> set page 1, show an empty result, and do not issue a redundant page request.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: both frontends call a named status API wrapper, assert the dedicated POST contract, and refresh filtered list data after success; controlled pagination reloads the final valid page when totals shrink.
+- Base: priority and weight continue through the generic edit endpoint because they remain configuration fields.
+- Bad: one frontend sends `{ id, status }` to `PUT /api/channel/`, treats the status response boolean as a channel model, or keeps the requested page after `total` makes it invalid.
+
+#### 6. Tests Required
+
+- Backend regression proving the generic edit endpoint rejects `status`.
+- Backend validation test accepting only enabled and manually disabled status values.
+- Frontend API tests for both status values, asserting the exact URL, POST method, and `{ status }` payload.
+- Frontend pagination tests covering a still-valid page, a total that moves the last item to an earlier page, and a zero-result query.
+- Build every locally embedded frontend after changing a shared backend write contract.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```js
+await API.put('/api/channel/', { id, status: 2 });
+record.status = response.data.data.status;
+```
+
+##### Correct
+
+```js
+await updateChannelStatus(id, 2);
+await refresh();
+
+// In both list response handlers:
+const validPage = getValidChannelPage(page, total, pageSize);
+if (validPage !== page) {
+  setActivePage(validPage);
+  if (total > 0) await loadChannels(validPage, pageSize);
+  return;
+}
+```
+
+---
+
 ## Testing Requirements
 
 <!-- What level of testing is expected -->
@@ -176,7 +251,7 @@ const isFailed = Boolean(failureReason)
 
 #### 3. Contracts
 
-- Applying `patches/001-*.patch` through `patches/009-*.patch` to `PATCH_BASE_REF` must reproduce every patch-owned path byte for byte from the integration tree.
+- Applying `patches/001-*.patch` through `patches/011-*.patch` to `PATCH_BASE_REF` must reproduce every patch-owned path byte for byte from the integration tree.
 - Patch application alone is not success. The replay tree must install locked Bun dependencies, test shared frontend state, build both frontends, compile Go, and run customization regressions.
 - `web/classic` must explicitly pin `date-fns@2.30.0` and `date-fns-tz@1.3.8` while `web/default` uses its newer dependency line. Do not rely on Bun workspace hoisting to select a compatible transitive version.
 - Both frontend builds may run in parallel, but `go build ./...` must wait for both because Go `embed` consumes both output trees.
@@ -202,7 +277,7 @@ const isFailed = Boolean(failureReason)
 
 - Run `make verify-patches` under an outer 120-second timeout.
 - Assert all numbered patches apply in order and replay-owned paths equal the integration tree.
-- Run `web/shared/frontend-lock.test.ts` and `web/default/src/lib/frontend-cache.test.ts`; assert the shared unlock survives default cache initialization.
+- Run `web/shared/frontend-lock.test.ts`, `web/default/src/lib/frontend-cache.test.ts`, and `web/classic/src/services/channel.test.js`; assert the shared unlock survives default cache initialization and Classic uses the dedicated channel-status endpoint.
 - Build `web/default` and `web/classic`, then run `go build ./...`.
 - Run the numbered customization regression groups and assert every background job exit status is collected.
 

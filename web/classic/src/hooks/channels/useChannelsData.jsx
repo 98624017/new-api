@@ -37,8 +37,10 @@ import { useIsMobile } from '../common/useIsMobile';
 import { useTableCompactMode } from '../common/useTableCompactMode';
 import { useChannelUpstreamUpdates } from './useChannelUpstreamUpdates';
 import { parseUpstreamUpdateMeta } from './upstreamUpdateUtils';
+import { getValidChannelPage } from './channelPagination';
 import { Modal, Button } from '@douyinfe/semi-ui';
 import { openCodexUsageModal } from '../../components/table/channels/modals/CodexUsageModal';
+import { updateChannelStatus } from '../../services/channel';
 
 export const useChannelsData = () => {
   const { t } = useTranslation();
@@ -357,6 +359,21 @@ export const useChannelsData = () => {
     const { success, message, data } = res.data;
     if (success) {
       const { items, total, type_counts } = data;
+      const validPage = getValidChannelPage(page, total, pageSize);
+      if (validPage !== page) {
+        setActivePage(validPage);
+        if (total > 0) {
+          await loadChannels(
+            validPage,
+            pageSize,
+            idSort,
+            enableTagMode,
+            typeKey,
+            statusF,
+          );
+          return;
+        }
+      }
       if (type_counts) {
         const sumAll = Object.values(type_counts).reduce(
           (acc, v) => acc + v,
@@ -404,6 +421,21 @@ export const useChannelsData = () => {
       const { success, message, data } = res.data;
       if (success) {
         const { items = [], total = 0, type_counts = {} } = data;
+        const validPage = getValidChannelPage(page, total, pageSz);
+        if (validPage !== page) {
+          setActivePage(validPage);
+          if (total > 0) {
+            await searchChannels(
+              enableTagMode,
+              typeKey,
+              statusF,
+              validPage,
+              pageSz,
+              sortFlag,
+            );
+            return;
+          }
+        }
         const sumAll = Object.values(type_counts).reduce(
           (acc, v) => acc + v,
           0,
@@ -411,7 +443,7 @@ export const useChannelsData = () => {
         setTypeCounts({ ...type_counts, all: sumAll });
         setChannelFormat(items, enableTagMode);
         setChannelCount(total);
-        setActivePage(page);
+        setActivePage(validPage);
       } else {
         showError(message);
       }
@@ -448,12 +480,10 @@ export const useChannelsData = () => {
         res = await API.delete(`/api/channel/${id}/`);
         break;
       case 'enable':
-        data.status = 1;
-        res = await API.put('/api/channel/', data);
+        res = await updateChannelStatus(id, 1);
         break;
       case 'disable':
-        data.status = 2;
-        res = await API.put('/api/channel/', data);
+        res = await updateChannelStatus(id, 2);
         break;
       case 'priority':
         if (value === '') return;
@@ -467,20 +497,23 @@ export const useChannelsData = () => {
         res = await API.put('/api/channel/', data);
         break;
       case 'enable_all':
-        data.channel_info = record.channel_info;
-        data.channel_info.multi_key_status_list = {};
+        data.channel_info = {
+          ...record.channel_info,
+          multi_key_status_list: {},
+        };
         res = await API.put('/api/channel/', data);
         break;
     }
     const { success, message } = res.data;
     if (success) {
       showSuccess(t('操作成功完成！'));
-      let channel = res.data.data;
-      let newChannels = [...channels];
-      if (action !== 'delete') {
-        record.status = channel.status;
+      if (
+        action === 'enable' ||
+        action === 'disable' ||
+        action === 'enable_all'
+      ) {
+        await refresh();
       }
-      setChannels(newChannels);
     } else {
       showError(message);
     }

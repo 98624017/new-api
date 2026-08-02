@@ -149,10 +149,12 @@ wait_for_checks() {
 
 command -v bun >/dev/null 2>&1 || fail "未找到 bun，无法验证双前端补丁"
 run_replay_check "安装 patch 重放树的前端依赖" bun install --cwd web --frozen-lockfile
-run_replay_check "验证 006/010 前端定制逻辑" bun test \
+run_replay_check "验证 006/010/011 前端定制逻辑" bun test \
   web/shared/frontend-lock.test.ts \
   web/default/src/lib/frontend-cache.test.ts \
-  web/default/src/features/usage-logs/lib/task-details.test.ts
+  web/default/src/features/usage-logs/lib/task-details.test.ts \
+  web/classic/src/hooks/channels/channelPagination.test.js \
+  web/classic/src/services/channel.test.js
 
 build_pids=()
 run_replay_check "编译 default 前端" bun run --cwd web/default build:check &

@@ -599,6 +599,52 @@ make verify-patches
 
 ---
 
+## 011-classic-channel-status-and-banner.patch
+
+**功能**：修复 Classic 渠道启用/禁用接口和筛选结果分页回退，并停止挂载旧版前端维护横幅。
+
+**背景**：后端专用状态接口上线后，`PUT /api/channel/` 会拒绝 `status` 字段，但 Classic 仍使用旧调用，因此启用和禁用均返回“无效的参数”。上游因计划移除 Classic 而未合并对应修复；本仓库继续维护 Classic，需要保留该兼容补丁。
+
+**涉及文件（7 个）**：
+
+### 1. `web/classic/src/services/channel.js`
+
+封装 `POST /api/channel/:id/status` 专用状态接口。
+
+### 2. `web/classic/src/services/channel.test.js`
+
+覆盖启用和禁用的 URL、POST 方法与 `{ status }` 载荷。
+
+### 3. `web/classic/src/hooks/channels/useChannelsData.jsx`
+
+启停操作改用专用状态服务，成功后按当前查询条件刷新列表；刷新使当前页越界时重新加载最后有效页，同时避免原地修改表格记录和多密钥状态对象。
+
+### 4. `web/classic/src/hooks/channels/channelPagination.js`
+
+统一计算普通列表和搜索列表可使用的有效页码。
+
+### 5. `web/classic/src/hooks/channels/channelPagination.test.js`
+
+覆盖总数缩减导致的末页回退，以及空结果回到第 1 页。
+
+### 6. `web/classic/src/components/layout/PageLayout.jsx`
+
+删除维护横幅的 import 与挂载点。保留横幅组件、样式和翻译资源，不通过 CSS 隐藏。
+
+### 7. `scripts/verify_patches.sh`
+
+把 Classic 状态 API 与分页测试加入补丁重放后的前端定向测试。
+
+### 回归验证
+
+```bash
+bun test web/classic/src/hooks/channels/channelPagination.test.js web/classic/src/services/channel.test.js
+bun run --cwd web/classic build
+make verify-patches
+```
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列
