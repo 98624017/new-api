@@ -285,11 +285,11 @@ Sora 适配器测试文件由后续共享该文件的 `007` 补丁首次创建�
 
 ## 005-project-maintenance-workflow.patch
 
-**功能**：项目维护工作流。保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等工程化差异。
+**功能**：项目维护工作流。保留本地上游同步、补丁校验、构建说明、Paseo worktree 准备和 multipart 回归修复等工程化差异。
 
 **背景**：当前项目除了业务二开外，还需要保留一组用于同步上游、验证补丁和稳定构建的本地维护文件。该补丁用于确保“项目锁定的原版 new-api + patches” 能重放到当前现状。
 
-**涉及文件（15 个）**：
+**涉及文件（16 个）**：
 
 ### 1. `.github/workflows/docker-image-manual-ghcr.yml`
 
@@ -321,27 +321,31 @@ Sora 适配器测试文件由后续共享该文件的 `007` 补丁首次创建�
 
 保留 `verify-patches` 等本地维护命令。
 
-### 8. `relay/common/relay_utils.go`
+### 8. `paseo.json`
+
+配置 Paseo 在创建 worktree 后依次下载 Go 模块并按 `web/bun.lock` 安装前端 workspace 依赖；不包含独立 Electron 打包依赖，也不自动启动开发服务。
+
+### 9. `relay/common/relay_utils.go`
 
 保留 multipart 请求体处理回归修复。
 
-### 9. `relay/common/relay_utils_test.go`
+### 10. `relay/common/relay_utils_test.go`
 
 覆盖 multipart 请求体回归测试。
 
-### 10. `scripts/sync_upstream_local.sh`
+### 11. `scripts/sync_upstream_local.sh`
 
 本地上游同步脚本。
 
-### 11. `scripts/verify_patches.sh`
+### 12. `scripts/verify_patches.sh`
 
 校验补丁配对、顺序应用、重放树一致性，并在临时重放树中执行前端干净安装、双前端构建、Go 编译和 9 组回归。每个编译或测试子命令最多运行 120 秒。
 
-### 12. `tools/skills/newapi-upstream-sync/SKILL.md`
+### 13. `tools/skills/newapi-upstream-sync/SKILL.md`
 
 本地上游同步 skill 说明。
 
-### 13. `web/classic/package.json` / `web/bun.lock`
+### 14. `web/classic/package.json` / `web/bun.lock`
 
 固定 classic 使用兼容的 `date-fns@2.30.0` 与 `date-fns-tz@1.3.8`，避免 Bun workspace 将旧版时区库错误解析到 default 使用的 `date-fns@4`。
 

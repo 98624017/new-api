@@ -45,8 +45,8 @@
 
 ### 005-project-maintenance-workflow
 
-- 目标：保留本地上游同步、补丁校验、构建说明和 multipart 回归修复等项目维护差异
-- 影响范围：CI workflow、README、AGENTS、makefile、同步脚本、补丁校验脚本、relay multipart 工具函数
+- 目标：保留本地上游同步、补丁校验、构建说明、Paseo worktree 准备和 multipart 回归修复等项目维护差异
+- 影响范围：CI workflow、README、AGENTS、makefile、Paseo 配置、同步脚本、补丁校验脚本、relay multipart 工具函数
 - 当前状态：已实现，并已生成 `patches/005-project-maintenance-workflow.patch`
 
 ### 006-frontend-lock

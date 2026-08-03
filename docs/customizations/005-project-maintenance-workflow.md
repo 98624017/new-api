@@ -15,6 +15,7 @@
 - 保留本地 README / AGENTS / makefile 中的项目维护说明。
 - 保留 multipart 请求体回归修复及测试。
 - 固定 classic 前端的 `date-fns` 兼容依赖，保证干净安装可构建。
+- 为 Paseo worktree 配置 Go 与 Bun 依赖安装命令，保证新工作区自动完成项目依赖准备。
 - 将补丁验证提升为“重放结果一致 + 双前端构建 + Go 编译 + 9 组回归”。
 - 避免这些维护性差异散落在工作区、无法通过补丁重放。
 
@@ -46,6 +47,9 @@
   - 保留本地维护说明入口。
 - `makefile`
   - 保留 `verify-patches` 等本地维护命令。
+- `paseo.json`
+  - 新 worktree 创建后依次执行 `go mod download` 和 `bun install --cwd web --frozen-lockfile`。
+  - 复用仓库根目录的 `go.mod` 与 `web/bun.lock`，不安装独立 Electron 打包依赖，也不自动启动或共享数据库服务。
 - `relay/common/relay_utils.go`
   - 保留 multipart 请求体处理回归修复。
 - `relay/common/relay_utils_test.go`
@@ -71,12 +75,15 @@
 - 并行回归不得让两个 `go test` 进程同时执行同一 package；新增定制测试时必须合并到现有 package 分组或重新划分互斥分组。
 - multipart 回归修复位于通用 relay 工具函数，需避免影响非 multipart 请求体处理。
 - GitHub Actions 上游同步 workflow 依赖当前分支的 `patches/*.patch` 作为临时补丁源；同步分支切到 upstream 后，不能再从工作区 `patches/` 读取补丁。
+- Paseo setup 只负责项目依赖，宿主机仍需预装 `go` 与 `bun`；任一命令失败时 Paseo 会保留失败状态并停止后续准备。
 
 ## 5. 测试方案
 
 最小验证命令：
 
 ```bash
+node -e "JSON.parse(require('node:fs').readFileSync('paseo.json', 'utf8'))"
+bun install --cwd web --frozen-lockfile
 make verify-patches
 ```
 

@@ -1296,3 +1296,17 @@ index ecc697128..c101bf030 100644
      "dayjs": "catalog:",
      "history": "^5.3.0",
      "highlight.js": "^11.11.1",
+diff --git a/paseo.json b/paseo.json
+new file mode 100644
+index 000000000..949bd6650
+--- /dev/null
++++ b/paseo.json
+@@ -0,0 +1,8 @@
++{
++  "worktree": {
++    "setup": [
++      "go mod download",
++      "bun install --cwd web --frozen-lockfile"
++    ]
++  }
++}
