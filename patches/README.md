@@ -61,7 +61,7 @@ PATCH_BASE_REF=upstream/main make verify-patches
 
 **背景**：上游的兑换接口 `POST /api/user/topup` 需要用户登录 Session，异步任务列表也依赖登录态。本补丁面向 API Key 二次分发、外部控制台和轮询工具，集中提供只持有 API Key 时需要的自助能力。
 
-**涉及文件（9 个）**：
+**涉及文件（17 个）**：
 
 ### 1. `controller/token_test.go`
 
@@ -90,9 +90,11 @@ PATCH_BASE_REF=upstream/main make verify-patches
 新增两条 API Key 认证路由：
 
 ```go
-apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+apiRouter.POST("/token/redeem", middleware.CORS(), middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
 taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserTokenTask)
 ```
+
+`/api/log/token` 同样先执行独立的认证前 IP 底线限流，再执行 `TokenAuthReadOnly()` 和按 `token_id` 的查询限流。Worker 回退链路需传递 Cloudflare 提供的真实客户端 IP；不同 key 即使共享管理员用户或代理入口，也不会共用 token 级额度。
 
 ### 5. `controller/task.go`
 
@@ -132,10 +134,43 @@ taskRoute.GET("/token/self", middleware.TokenAuthReadOnly(), controller.GetUserT
 - 仅返回当前 token 创建的任务
 - `task_id` 过滤参数仍然生效
 
+### 10. `middleware/rate-limit.go`
+
+复用现有限流存储，提供独立于全局 API 限流开关的认证前 IP 底线限流，并支持从已认证上下文读取 `token_id`，提供 token 级查询和高敏限流。
+
+### 11. `middleware/rate_limit_token_test.go`
+
+验证同一用户、同一代理 IP 下的不同 token 使用独立限流桶，以及全局 API 限流关闭时认证前 IP 底线限流仍然生效。
+
+### 12. `controller/log.go`
+
+解析 token 日志的分页和时间范围参数。
+
+### 13. `model/log.go`
+
+按 `token_id`、时间范围、分页查询日志。
+
+### 14. `controller/token_log_test.go`
+
+验证日志不会混入同一用户的其他 token，并正确应用时间筛选和分页；负数页大小仍受默认上限约束。
+
+### 15. `common/page_info.go`
+
+将非正数页大小恢复为默认值，避免 GORM `Limit(-1)` 取消查询上限。
+
+### 16. `common/constants.go`
+
+新增认证前 IP 底线限流的默认次数和时间窗口。
+
+### 17. `common/init.go`
+
+支持通过 `TOKEN_AUTH_RATE_LIMIT` 和 `TOKEN_AUTH_RATE_LIMIT_DURATION` 调整认证前 IP 底线限流，默认 120 次/60 秒。
+
 ### 回归验证
 
 ```bash
-go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask)' -count=1
+go test ./middleware -run '^TestToken(CriticalRateLimitIsIsolatedByTokenID|AuthAttemptRateLimitRunsWhenGlobalLimitIsDisabled)$' -count=1
+go test ./controller -run '^(TestTokenRedeem|TestGetUserTokenTask|TestGetLogByKey)' -count=1
 ```
 
 ---

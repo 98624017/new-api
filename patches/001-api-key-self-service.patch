@@ -1,5 +1,70 @@
+diff --git a/common/constants.go b/common/constants.go
+index 87d212f99732709394ea474ff92982b3ea909ca5..b0f569c1b862453c83a7c045dd8516ce3031f866 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -232,6 +232,9 @@ var (
+ 	CriticalRateLimitNum            = 20
+ 	CriticalRateLimitDuration int64 = 20 * 60
+ 
++	TokenAuthRateLimitNum            = 120
++	TokenAuthRateLimitDuration int64 = 60
++
+ 	UploadRateLimitNum            = 10
+ 	UploadRateLimitDuration int64 = 60
+ 
+diff --git a/common/init.go b/common/init.go
+index 88b2dc3e62e1481e2f326db864ec4d669210648c..357a82eb61b51712603d7e96c57b5b644b7fc7c4 100644
+--- a/common/init.go
++++ b/common/init.go
+@@ -128,6 +128,9 @@ func InitEnv() {
+ 	CriticalRateLimitNum = GetEnvOrDefault("CRITICAL_RATE_LIMIT", 20)
+ 	CriticalRateLimitDuration = int64(GetEnvOrDefault("CRITICAL_RATE_LIMIT_DURATION", 20*60))
+ 
++	TokenAuthRateLimitNum = GetEnvOrDefault("TOKEN_AUTH_RATE_LIMIT", 120)
++	TokenAuthRateLimitDuration = int64(GetEnvOrDefault("TOKEN_AUTH_RATE_LIMIT_DURATION", 60))
++
+ 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
+ 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
+ 	SearchRateLimitDuration = int64(GetEnvOrDefault("SEARCH_RATE_LIMIT_DURATION", 60))
+diff --git a/common/page_info.go b/common/page_info.go
+index 2378a5d81fdbc7f10cab4258fa72795ea04ccd83..4938c29972bcb9a2fb3db358d1c16441f845899c 100644
+--- a/common/page_info.go
++++ b/common/page_info.go
+@@ -74,7 +74,9 @@ func GetPageQuery(c *gin.Context) *PageInfo {
+ 		}
+ 	}
+ 
+-	if pageInfo.PageSize > 100 {
++	if pageInfo.PageSize < 1 {
++		pageInfo.PageSize = ItemsPerPage
++	} else if pageInfo.PageSize > 100 {
+ 		pageInfo.PageSize = 100
+ 	}
+ 
+diff --git a/controller/log.go b/controller/log.go
+index ce9b4666fa5e7c376f3a74f4a48fd576dbe8ef1c..864d2809db9c5eb49d24416f4faf4081be3f26ff 100644
+--- a/controller/log.go
++++ b/controller/log.go
+@@ -80,7 +80,16 @@ func GetLogByKey(c *gin.Context) {
+ 		})
+ 		return
+ 	}
+-	logs, err := model.GetLogByTokenId(tokenId)
++	pageInfo := common.GetPageQuery(c)
++	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
++	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
++	logs, err := model.GetLogByTokenId(
++		tokenId,
++		startTimestamp,
++		endTimestamp,
++		pageInfo.GetStartIdx(),
++		pageInfo.GetPageSize(),
++	)
+ 	if err != nil {
+ 		c.JSON(200, gin.H{
+ 			"success": false,
 diff --git a/controller/relay.go b/controller/relay.go
-index 6e91ccb60..01115f6fc 100644
+index 6e91ccb605063bfcec3173d65cb546e8f8f6cbe8..01115f6fc12a589ce3535b23877c0c35ae71064d 100644
 --- a/controller/relay.go
 +++ b/controller/relay.go
 @@ -582,6 +582,7 @@ func RelayTask(c *gin.Context) {
@@ -11,7 +76,7 @@ index 6e91ccb60..01115f6fc 100644
  		task.PrivateData.NodeName = common.NodeName
  		task.PrivateData.BillingContext = &model.TaskBillingContext{
 diff --git a/controller/task.go b/controller/task.go
-index a80f1a687..397087fe1 100644
+index a80f1a687aab061a8e33ae71cd5b583098833ebc..397087fe10ddd3711d70cacaca81262e3247e1ca 100644
 --- a/controller/task.go
 +++ b/controller/task.go
 @@ -60,6 +60,31 @@ func GetUserTask(c *gin.Context) {
@@ -48,7 +113,7 @@ index a80f1a687..397087fe1 100644
  	if fillUser {
 diff --git a/controller/task_token_test.go b/controller/task_token_test.go
 new file mode 100644
-index 000000000..9733a46d3
+index 0000000000000000000000000000000000000000..9733a46d3b75a5f2f1b0265245388317d6d2459e
 --- /dev/null
 +++ b/controller/task_token_test.go
 @@ -0,0 +1,149 @@
@@ -201,8 +266,115 @@ index 000000000..9733a46d3
 +	assert.Equal(t, "task-filter-hit", page.Items[0].TaskID)
 +	assert.Equal(t, string(model.TaskStatusSuccess), page.Items[0].Status)
 +}
+diff --git a/controller/token_log_test.go b/controller/token_log_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..634546ec5e64feee2ee82517d14f14e3668e9226
+--- /dev/null
++++ b/controller/token_log_test.go
+@@ -0,0 +1,101 @@
++package controller_test
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/controller"
++	"github.com/QuantumNous/new-api/middleware"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func makeTokenLogRouter() *gin.Engine {
++	router := gin.New()
++	router.GET("/api/log/token", middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenSearchRateLimit(), controller.GetLogByKey)
++	return router
++}
++
++func performTokenLogRequest(t *testing.T, router *gin.Engine, auth string, rawQuery string) *httptest.ResponseRecorder {
++	t.Helper()
++	target := "/api/log/token"
++	if rawQuery != "" {
++		target += "?" + rawQuery
++	}
++	req := httptest.NewRequest(http.MethodGet, target, nil)
++	if auth != "" {
++		req.Header.Set("Authorization", auth)
++	}
++
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, req)
++	return w
++}
++
++func TestGetLogByKeyFiltersAndPaginatesCurrentToken(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 41
++	const tokenID = 4101
++	const otherTokenID = 4102
++	const tokenKey = "logtoken4101"
++	seedRedeemUser(t, userID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++	seedRedeemToken(t, otherTokenID, userID, "logtoken4102", 1000, 0)
++
++	logs := []model.Log{
++		{UserId: userID, TokenId: tokenID, CreatedAt: 100, Content: "outside-range"},
++		{UserId: userID, TokenId: tokenID, CreatedAt: 200, Content: "page-two"},
++		{UserId: userID, TokenId: tokenID, CreatedAt: 300, Content: "page-one"},
++		{UserId: userID, TokenId: otherTokenID, CreatedAt: 250, Content: "other-token"},
++	}
++	require.NoError(t, model.LOG_DB.Create(&logs).Error)
++
++	w := performTokenLogRequest(
++		t,
++		makeTokenLogRouter(),
++		"Bearer sk-"+tokenKey,
++		"p=2&page_size=1&start_timestamp=150&end_timestamp=300",
++	)
++
++	require.Equal(t, http.StatusOK, w.Code)
++	var response struct {
++		Success bool        `json:"success"`
++		Data    []model.Log `json:"data"`
++	}
++	require.NoError(t, common.Unmarshal(w.Body.Bytes(), &response))
++	require.True(t, response.Success)
++	require.Len(t, response.Data, 1)
++	assert.Equal(t, "page-two", response.Data[0].Content)
++}
++
++func TestGetLogByKeyRejectsUnboundedNegativePageSize(t *testing.T) {
++	truncateTables(t)
++
++	const userID = 42
++	const tokenID = 4201
++	const tokenKey = "logtoken4201"
++	seedRedeemUser(t, userID, 0)
++	seedRedeemToken(t, tokenID, userID, tokenKey, 1000, 0)
++
++	logs := make([]model.Log, common.ItemsPerPage+1)
++	for i := range logs {
++		logs[i] = model.Log{UserId: userID, TokenId: tokenID, CreatedAt: int64(i + 1)}
++	}
++	require.NoError(t, model.LOG_DB.Create(&logs).Error)
++
++	w := performTokenLogRequest(t, makeTokenLogRouter(), "Bearer sk-"+tokenKey, "page_size=-1")
++
++	require.Equal(t, http.StatusOK, w.Code)
++	var response struct {
++		Success bool        `json:"success"`
++		Data    []model.Log `json:"data"`
++	}
++	require.NoError(t, common.Unmarshal(w.Body.Bytes(), &response))
++	require.True(t, response.Success)
++	assert.Len(t, response.Data, common.ItemsPerPage)
++}
 diff --git a/controller/token_test.go b/controller/token_test.go
-index 12b1cbdd8..55bec729b 100644
+index 12b1cbdd84fbc437a25785c1ae9b85d6d09b4c2a..55bec729b752fd4ade2a390240b9c856bcd28b6e 100644
 --- a/controller/token_test.go
 +++ b/controller/token_test.go
 @@ -75,6 +75,10 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
@@ -266,7 +438,7 @@ index 12b1cbdd8..55bec729b 100644
  }
  
 diff --git a/controller/user.go b/controller/user.go
-index 3e5293be1..289b757f0 100644
+index 3e5293be1b1a9ee35f6b00e3bd4e6a2a0c68727b..289b757f04e87f520c6241c61a13d632d2561154 100644
 --- a/controller/user.go
 +++ b/controller/user.go
 @@ -1323,6 +1323,42 @@ func TopUp(c *gin.Context) {
@@ -314,7 +486,7 @@ index 3e5293be1..289b757f0 100644
  	QuotaWarningThreshold            float64 `json:"quota_warning_threshold"`
 diff --git a/controller/user_token_redeem_test.go b/controller/user_token_redeem_test.go
 new file mode 100644
-index 000000000..fa9b57709
+index 0000000000000000000000000000000000000000..3e65ea7c549fc1dd688ac0a86323e91146f523fc
 --- /dev/null
 +++ b/controller/user_token_redeem_test.go
 @@ -0,0 +1,259 @@
@@ -424,7 +596,7 @@ index 000000000..fa9b57709
 +
 +func makeTokenRedeemRouter() *gin.Engine {
 +	router := gin.New()
-+	router.POST("/api/token/redeem", middleware.TokenAuthReadOnly(), controller.TokenRedeem)
++	router.POST("/api/token/redeem", middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
 +	return router
 +}
 +
@@ -577,8 +749,225 @@ index 000000000..fa9b57709
 +	assert.NotEmpty(t, resp.Message)
 +	assert.Equal(t, initQuota, getUserQuotaForTest(t, userID))
 +}
+diff --git a/middleware/rate-limit.go b/middleware/rate-limit.go
+index d8dd15d9c5d79a23e507f93f6e6cc52cc733eaab..543c0a0c57c15d2ce61382a8fb914ad31fab2aeb 100644
+--- a/middleware/rate-limit.go
++++ b/middleware/rate-limit.go
+@@ -108,6 +108,10 @@ func CriticalRateLimit() func(c *gin.Context) {
+ 	return defNext
+ }
+ 
++func TokenAuthAttemptRateLimit() func(c *gin.Context) {
++	return rateLimitFactory(common.TokenAuthRateLimitNum, common.TokenAuthRateLimitDuration, "TA")
++}
++
+ func DownloadRateLimit() func(c *gin.Context) {
+ 	return rateLimitFactory(common.DownloadRateLimitNum, common.DownloadRateLimitDuration, "DW")
+ }
+@@ -116,32 +120,31 @@ func UploadRateLimit() func(c *gin.Context) {
+ 	return rateLimitFactory(common.UploadRateLimitNum, common.UploadRateLimitDuration, "UP")
+ }
+ 
+-// userRateLimitFactory creates a rate limiter keyed by authenticated user ID
+-// instead of client IP, making it resistant to proxy rotation attacks.
+-// Must be used AFTER authentication middleware (UserAuth).
+-func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
++// idRateLimitFactory creates a rate limiter keyed by an authenticated context ID.
++// It must be used after the middleware that populates contextKey.
++func idRateLimitFactory(maxRequestNum int, duration int64, mark string, contextKey string, scope string) func(c *gin.Context) {
+ 	if common.RedisEnabled {
+ 		return func(c *gin.Context) {
+-			userId := c.GetInt("id")
+-			if userId == 0 {
++			id := c.GetInt(contextKey)
++			if id == 0 {
+ 				c.Status(http.StatusUnauthorized)
+ 				c.Abort()
+ 				return
+ 			}
+-			key := fmt.Sprintf("rateLimit:%s:user:%d", mark, userId)
+-			userRedisRateLimiter(c, maxRequestNum, duration, key)
++			key := fmt.Sprintf("rateLimit:%s:%s:%d", mark, scope, id)
++			redisRateLimiterByKey(c, maxRequestNum, duration, key)
+ 		}
+ 	}
+ 	// It's safe to call multi times.
+ 	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+ 	return func(c *gin.Context) {
+-		userId := c.GetInt("id")
+-		if userId == 0 {
++		id := c.GetInt(contextKey)
++		if id == 0 {
+ 			c.Status(http.StatusUnauthorized)
+ 			c.Abort()
+ 			return
+ 		}
+-		key := fmt.Sprintf("%s:user:%d", mark, userId)
++		key := fmt.Sprintf("%s:%s:%d", mark, scope, id)
+ 		if !inMemoryRateLimiter.Request(key, maxRequestNum, duration) {
+ 			c.Status(http.StatusTooManyRequests)
+ 			c.Abort()
+@@ -150,9 +153,8 @@ func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c
+ 	}
+ }
+ 
+-// userRedisRateLimiter is like redisRateLimiter but accepts a pre-built key
+-// (to support user-ID-based keys).
+-func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key string) {
++// redisRateLimiterByKey is like redisRateLimiter but accepts a pre-built key.
++func redisRateLimiterByKey(c *gin.Context, maxRequestNum int, duration int64, key string) {
+ 	ctx := context.Background()
+ 	rdb := common.RDB
+ 	listLength, err := rdb.LLen(ctx, key).Result()
+@@ -201,5 +203,19 @@ func SearchRateLimit() func(c *gin.Context) {
+ 	if !common.SearchRateLimitEnable {
+ 		return defNext
+ 	}
+-	return userRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR")
++	return idRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR", "id", "user")
++}
++
++func TokenCriticalRateLimit() func(c *gin.Context) {
++	if !common.CriticalRateLimitEnable {
++		return defNext
++	}
++	return idRateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT", "token_id", "token")
++}
++
++func TokenSearchRateLimit() func(c *gin.Context) {
++	if !common.SearchRateLimitEnable {
++		return defNext
++	}
++	return idRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR", "token_id", "token")
+ }
+diff --git a/middleware/rate_limit_token_test.go b/middleware/rate_limit_token_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..294dc729951304014808cb410b16db1f95286a5b
+--- /dev/null
++++ b/middleware/rate_limit_token_test.go
+@@ -0,0 +1,92 @@
++package middleware
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestTokenCriticalRateLimitIsIsolatedByTokenID(t *testing.T) {
++	previousRedisEnabled := common.RedisEnabled
++	previousEnabled := common.CriticalRateLimitEnable
++	previousLimit := common.CriticalRateLimitNum
++	previousDuration := common.CriticalRateLimitDuration
++	common.RedisEnabled = false
++	common.CriticalRateLimitEnable = true
++	common.CriticalRateLimitNum = 1
++	common.CriticalRateLimitDuration = 60
++	t.Cleanup(func() {
++		common.RedisEnabled = previousRedisEnabled
++		common.CriticalRateLimitEnable = previousEnabled
++		common.CriticalRateLimitNum = previousLimit
++		common.CriticalRateLimitDuration = previousDuration
++	})
++
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		tokenID, err := strconv.Atoi(c.GetHeader("X-Test-Token-ID"))
++		require.NoError(t, err)
++		c.Set("id", 1)
++		c.Set("token_id", tokenID)
++		c.Next()
++	})
++	router.GET("/", TokenCriticalRateLimit(), func(c *gin.Context) {
++		c.Status(http.StatusNoContent)
++	})
++
++	request := func(tokenID string) int {
++		recorder := httptest.NewRecorder()
++		req := httptest.NewRequest(http.MethodGet, "/", nil)
++		req.Header.Set("X-Test-Token-ID", tokenID)
++		router.ServeHTTP(recorder, req)
++		return recorder.Code
++	}
++
++	require.Equal(t, http.StatusNoContent, request("91001"))
++	require.Equal(t, http.StatusNoContent, request("91002"))
++	require.Equal(t, http.StatusTooManyRequests, request("91001"))
++}
++
++func TestTokenAuthAttemptRateLimitRunsWhenGlobalLimitIsDisabled(t *testing.T) {
++	previousRedisEnabled := common.RedisEnabled
++	previousGlobalEnabled := common.GlobalApiRateLimitEnable
++	previousLimit := common.TokenAuthRateLimitNum
++	previousDuration := common.TokenAuthRateLimitDuration
++	common.RedisEnabled = false
++	common.GlobalApiRateLimitEnable = false
++	common.TokenAuthRateLimitNum = 1
++	common.TokenAuthRateLimitDuration = 60
++	t.Cleanup(func() {
++		common.RedisEnabled = previousRedisEnabled
++		common.GlobalApiRateLimitEnable = previousGlobalEnabled
++		common.TokenAuthRateLimitNum = previousLimit
++		common.TokenAuthRateLimitDuration = previousDuration
++	})
++
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	authAttempts := 0
++	router.POST("/", TokenAuthAttemptRateLimit(), func(c *gin.Context) {
++		authAttempts++
++		c.Status(http.StatusUnauthorized)
++	})
++
++	request := func(remoteAddr string) int {
++		recorder := httptest.NewRecorder()
++		req := httptest.NewRequest(http.MethodPost, "/", nil)
++		req.RemoteAddr = remoteAddr
++		router.ServeHTTP(recorder, req)
++		return recorder.Code
++	}
++
++	require.Equal(t, http.StatusUnauthorized, request("192.0.2.10:1234"))
++	require.Equal(t, http.StatusTooManyRequests, request("192.0.2.10:5678"))
++	require.Equal(t, http.StatusUnauthorized, request("192.0.2.11:1234"))
++	require.Equal(t, 2, authAttempts)
++}
+diff --git a/model/log.go b/model/log.go
+index 506bd504b68687714e1eefed70c45b1264fe6f88..4676923e182f37221b2789e6f95866a5c1f5e170 100644
+--- a/model/log.go
++++ b/model/log.go
+@@ -131,13 +131,20 @@ func formatUserLogs(logs []*Log, startIdx int) {
+ 	assignDisplayLogIds(logs, startIdx)
+ }
+ 
+-func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
++func GetLogByTokenId(tokenId int, startTimestamp int64, endTimestamp int64, startIdx int, num int) (logs []*Log, err error) {
+ 	order := "id desc"
+ 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+ 		order = clickHouseLogOrder("")
+ 	}
+-	err = LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
+-	formatUserLogs(logs, 0)
++	tx := LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId)
++	if startTimestamp != 0 {
++		tx = tx.Where("created_at >= ?", startTimestamp)
++	}
++	if endTimestamp != 0 {
++		tx = tx.Where("created_at <= ?", endTimestamp)
++	}
++	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
++	formatUserLogs(logs, startIdx)
+ 	return logs, err
+ }
+ 
 diff --git a/model/redemption.go b/model/redemption.go
-index 23985ef47..91b254c20 100644
+index 23985ef474b7941dceea3653f9720e68ea4875dc..91b254c2013e1e3a9385edd9249e0b39d29959f3 100644
 --- a/model/redemption.go
 +++ b/model/redemption.go
 @@ -7,6 +7,7 @@ import (
@@ -687,7 +1076,7 @@ index 23985ef47..91b254c20 100644
  	var err error
  	err = DB.Create(redemption).Error
 diff --git a/model/task.go b/model/task.go
-index cf936ed1f..8b3c5adb0 100644
+index cf936ed1f9674a699ecede3989bad10485f1a7f0..8b3c5adb0e4866075fea6ca61454c9772408abb3 100644
 --- a/model/task.go
 +++ b/model/task.go
 @@ -10,6 +10,7 @@ import (
@@ -850,7 +1239,7 @@ index cf936ed1f..8b3c5adb0 100644
  func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
  	openAIVideo := dto.NewOpenAIVideo()
 diff --git a/router/api-router.go b/router/api-router.go
-index 83f9259b2..24868cf50 100644
+index 83f9259b21320dea8b944393a5b9a5dc0136e324..01157af8576ea9d001726ff6a51b6cd65943a61a 100644
 --- a/router/api-router.go
 +++ b/router/api-router.go
 @@ -253,6 +253,9 @@ func SetApiRouter(router *gin.Engine) {
@@ -858,12 +1247,24 @@ index 83f9259b2..24868cf50 100644
  		}
  
 +		// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
-+		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
++		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
 +
  		redemptionRoute := apiRouter.Group("/redemption")
  		redemptionRoute.Use(middleware.AdminAuth())
  		{
-@@ -325,6 +328,7 @@ func SetApiRouter(router *gin.Engine) {
+@@ -299,10 +302,7 @@ func SetApiRouter(router *gin.Engine) {
+ 		dataRoute.GET("/flow", middleware.AdminAuth(), controller.GetAllFlowQuotaDates)
+ 		dataRoute.GET("/flow/self", middleware.UserAuth(), controller.GetUserFlowQuotaDates)
+ 
+-		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
+-		{
+-			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
+-		}
++		logRoute.GET("/token", middleware.CORS(), middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenSearchRateLimit(), controller.GetLogByKey)
+ 		groupRoute := apiRouter.Group("/group")
+ 		groupRoute.Use(middleware.AdminAuth())
+ 		{
+@@ -325,6 +325,7 @@ func SetApiRouter(router *gin.Engine) {
  		taskRoute := apiRouter.Group("/task")
  		{
  			taskRoute.GET("/self", middleware.UserAuth(), controller.GetUserTask)

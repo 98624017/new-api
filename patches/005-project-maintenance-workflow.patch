@@ -1071,7 +1071,7 @@ index 000000000..acd49b950
 +
 +test_pids=()
 +run_replay_check "验证 001/008 API Key 自助与任务接口" \
-+  go test ./controller -run '(TokenRedeem|GetUserTokenTask|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
++  go test ./controller -run '(TokenRedeem|GetUserTokenTask|GetLogByKey|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
 +test_pids+=("$!")
 +run_replay_check "验证 002/003 退款开关与金额脱敏" \
 +  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts)' -count=1 &

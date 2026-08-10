@@ -254,7 +254,7 @@ func SetApiRouter(router *gin.Engine) {
 		}
 
 		// 通过 API Key (sk-xxx) 免登录兑换，供外部工具（如 neko-api-key-tool）使用
-		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+		apiRouter.POST("/token/redeem", middleware.CORS(), middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
 
 		redemptionRoute := apiRouter.Group("/redemption")
 		redemptionRoute.Use(middleware.AdminAuth())
@@ -302,10 +302,7 @@ func SetApiRouter(router *gin.Engine) {
 		dataRoute.GET("/flow", middleware.AdminAuth(), controller.GetAllFlowQuotaDates)
 		dataRoute.GET("/flow/self", middleware.UserAuth(), controller.GetUserFlowQuotaDates)
 
-		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
-		{
-			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
-		}
+		logRoute.GET("/token", middleware.CORS(), middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenSearchRateLimit(), controller.GetLogByKey)
 		groupRoute := apiRouter.Group("/group")
 		groupRoute.Use(middleware.AdminAuth())
 		{

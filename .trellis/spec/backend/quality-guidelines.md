@@ -30,6 +30,64 @@ Questions to answer:
 
 ## Required Patterns
 
+### Scenario: Distributed API Key Self-Service Rate Limits
+
+#### 1. Scope / Trigger
+
+- Trigger: an endpoint uses `TokenAuthReadOnly()` so externally distributed API keys can query or mutate their own state without a user session.
+- Applies when many token records may share one owner account or reach new-api through one reverse-proxy IP.
+
+#### 2. Signatures
+
+- Authentication: `middleware.TokenAuthReadOnly()` populates `id`, `token_id`, and `token_key`.
+- Pre-authentication protection: `middleware.TokenAuthAttemptRateLimit()` limits attempts by client IP independently of the global API rate-limit switch.
+- Token-scoped limits: `middleware.TokenSearchRateLimit()` and `middleware.TokenCriticalRateLimit()`.
+- Self-service routes: `GET /api/log/token` and `POST /api/token/redeem`.
+
+#### 3. Contracts
+
+- `TokenAuthAttemptRateLimit()` must run before token authentication on public API-key self-service endpoints.
+- Token authentication must run before a token-scoped rate limiter.
+- The limiter key must contain `token_id`; neither client IP nor `user_id` identifies a distributed key.
+- `GET /api/log/token` remains scoped to the authenticated `token_id` and supports `p`, `page_size`, `start_timestamp`, and `end_timestamp`.
+- Billing summaries remain token-scoped while `DisplayTokenStatEnabled` is enabled.
+
+#### 4. Validation & Error Matrix
+
+- Missing or invalid API key within the pre-authentication IP budget -> authentication error without reading a token-scoped bucket.
+- Repeated authentication attempts from one IP past the independent budget -> HTTP 429 even when the global API limiter is disabled.
+- Two valid tokens with the same `user_id` and client IP -> independent request budgets.
+- Repeated requests from one token past its configured budget -> HTTP 429 for that token only.
+- Log time range with no matching current-token rows -> successful empty array.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: `TokenAuthAttemptRateLimit(), TokenAuthReadOnly(), TokenSearchRateLimit(), controller.GetLogByKey`.
+- Base: two tokens owned by one administrator can each query their own records.
+- Bad: `CriticalRateLimit(), TokenAuthReadOnly()` because reverse-proxy users share the IP bucket.
+- Bad: a user-scoped limiter because all distributed tokens may share the administrator `user_id`.
+
+#### 6. Tests Required
+
+- Middleware regression proving two `token_id` values under one `user_id` have independent buckets.
+- Middleware regression proving the pre-authentication IP limiter remains active when the global API limiter is disabled.
+- Controller regression proving pagination and timestamps do not leak rows from another token.
+- Existing invalid-token and redemption transaction tests must remain green.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```go
+apiRouter.POST("/token/redeem", middleware.CriticalRateLimit(), middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+```
+
+##### Correct
+
+```go
+apiRouter.POST("/token/redeem", middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
+```
+
 ### Scenario: Task Adaptor Channel-Specific Request And Billing Contracts
 
 #### 1. Scope / Trigger

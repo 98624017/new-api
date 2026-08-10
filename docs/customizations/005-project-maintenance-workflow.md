@@ -58,7 +58,7 @@
   - 本地上游同步脚本。
 - `scripts/verify_patches.sh`
   - 校验文档与补丁配对、补丁顺序应用和 patch 所属文件最终一致性。
-  - 在临时重放树中执行 Bun 干净安装、共享锁屏与 default 缓存保留测试、default/classic 构建、Go 全量编译和定制定向测试。
+  - 在临时重放树中执行 Bun 干净安装、共享锁屏与 default 缓存保留测试、default/classic 构建、Go 全量编译和定制定向测试，包括 token 日志负数页大小回归。
   - 两套前端并行构建；Go 编译等待两套产物完成；定向测试按互不重叠的 Go package 分组并行，确保完整门禁可在 120 秒总时限内完成。
 - `web/classic/package.json` / `web/bun.lock`
   - classic 显式固定 `date-fns@2.30.0` 与 `date-fns-tz@1.3.8`，避免 Bun workspace 把旧版 `date-fns-tz` 提升后错误解析到 default 使用的 `date-fns@4`。

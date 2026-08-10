@@ -22,7 +22,7 @@
 ### 001-api-key-self-service
 
 - 目标：允许通过 API Key (`Bearer sk-xxx`) 兑换兑换码，并免登录查询当前 key 创建的异步任务列表
-- 影响范围：兑换接口、Token 认证链路、充值使用记录、任务列表接口、任务落库字段、新任务 token 维度查询
+- 影响范围：兑换接口、Token 认证与 token 级限流、充值使用记录、token 日志分页、任务列表接口、任务落库字段、新任务 token 维度查询
 - 当前状态：由原 `001-token-redeem-via-apikey` 和 `005-task-list-via-apikey` 合并，已生成 `patches/001-api-key-self-service.patch`
 
 ### 002-task-refund-restore-token-quota

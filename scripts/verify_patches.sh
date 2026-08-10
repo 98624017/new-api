@@ -167,7 +167,7 @@ run_replay_check "编译 patch 重放后的 Go 项目" go build ./...
 
 test_pids=()
 run_replay_check "验证 001/008 API Key 自助与任务接口" \
-  go test ./controller -run '(TokenRedeem|GetUserTokenTask|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+  go test ./controller -run '(TokenRedeem|GetUserTokenTask|GetLogByKey|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
 test_pids+=("$!")
 run_replay_check "验证 002/003/012 退款、金额脱敏与备用码" \
   go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes)' -count=1 &

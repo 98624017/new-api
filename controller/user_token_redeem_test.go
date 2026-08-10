@@ -106,7 +106,7 @@ func seedRedemptionCode(t *testing.T, id int, key string, quota int) {
 
 func makeTokenRedeemRouter() *gin.Engine {
 	router := gin.New()
-	router.POST("/api/token/redeem", middleware.TokenAuthReadOnly(), controller.TokenRedeem)
+	router.POST("/api/token/redeem", middleware.TokenAuthAttemptRateLimit(), middleware.TokenAuthReadOnly(), middleware.TokenCriticalRateLimit(), controller.TokenRedeem)
 	return router
 }
 
