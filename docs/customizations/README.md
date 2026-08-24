@@ -91,6 +91,12 @@
 - 影响范围：备用码生成合同、Default/Classic 备用码列表布局、补丁重放测试
 - 当前状态：已实现，并已生成 `patches/012-2fa-twenty-backup-codes.patch`
 
+### 013-hide-credit-system-prompts
+
+- 目标：阻止 API key 自助积分日志和客户 dashboard 展示包含渠道 system prompt 的参数覆盖审计字段 `other.po`
+- 影响范围：普通用户日志序列化、task-dashboard 积分详情解析、后端与前端回归测试
+- 当前状态：已实现，并已生成 `patches/013-hide-credit-system-prompts.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -113,7 +119,7 @@
 make verify-patches
 ```
 
-`make verify-patches` 会在临时 worktree 中按顺序重放 001-012，检查 patch
+`make verify-patches` 会在临时 worktree 中按顺序重放 001-013，检查 patch
 所属文件与当前集成树一致，然后执行前端干净安装、共享锁屏测试、双前端构建、
 Go 全量编译和 9 组定向回归。每个编译或测试子命令最多运行 120 秒。
 

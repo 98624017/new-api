@@ -728,6 +728,17 @@ make verify-patches
 
 ---
 
+## 013-hide-credit-system-prompts.patch
+
+**功能**：从普通用户/API key 自助日志响应中移除可能包含渠道 system prompt 的 `other.po` 参数覆盖审计字段，并由 task-dashboard 二次过滤；保留管理员日志和公开计费元数据。
+
+**涉及文件**：
+
+- `model/log.go`
+- `model/log_format_test.go`
+
+---
+
 ## 补丁维护规范
 
 1. **文件命名**：`NNN-简短描述.patch`，按序号排列

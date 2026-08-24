@@ -33,3 +33,21 @@ func TestFormatUserLogsStripsQuotaSaturation(t *testing.T) {
 	// Non-admin billing fields remain visible.
 	require.Contains(t, parsed, "model_price")
 }
+
+func TestFormatUserLogsStripsParamOverrideAudit(t *testing.T) {
+	other := common.MapToJsonStr(map[string]interface{}{
+		"model_price": 0.1,
+		"po": []interface{}{
+			"prepend messages with system prompt",
+		},
+	})
+	logs := []*Log{{Other: other}}
+
+	formatUserLogs(logs, 0)
+
+	parsed, err := common.StrToMap(logs[0].Other)
+	require.NoError(t, err)
+	_, hasParamOverrideAudit := parsed["po"]
+	require.False(t, hasParamOverrideAudit, "param override audit must be stripped from user log views")
+	require.Contains(t, parsed, "model_price")
+}
