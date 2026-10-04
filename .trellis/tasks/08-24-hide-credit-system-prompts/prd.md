@@ -15,7 +15,6 @@
 - `task-dashboard/src/api/client.ts` 将该接口结果解析为 `UsageLogItem[]`；`CreditRecordsPage` 会直接显示 `log.content`，并展示过滤后的最多四个 `other` 条目。
 - NewAPI 的 LLM 计费日志主要由 `service.PostTextConsumeQuota` / `PostAudioConsumeQuota` 写入，当前代码没有在 token 日志读取边界集中处理渠道系统提示词。
 - 渠道系统提示词在 relay 层由 `ChannelSetting.SystemPrompt` 注入请求；该内容不应成为普通客户日志的公开字段。
-- `graphify-out/GRAPH_REPORT.md` 在当前工作区不存在，无法提供图谱报告；本次数据流已通过路由、控制器、模型和 dashboard 调用链直接核对。
 - 已用用户授权的只读 API key 查询线上 `/api/log/token`：受影响的 `xqyc` 消费记录在 `other.po`（param override audit）中携带了完整的 `prepend messages` JSON，其中包含 NewAPI 注入的 system message；该字段可直接暴露核心提示词。
 
 ## Requirements
@@ -43,7 +42,7 @@
 
 ## Notes
 
-- 验证记录：`go test -p 1 ./model -run '^TestFormatUserLogs' -count=1`、dashboard `bun run test`（39 项）和 `bun run build` 通过；`make verify-patches` 的 001–013 重放及定向测试通过，但临时 worktree 的双前端构建最终因资源/超时被 SIGTERM；当前环境未安装 `graphify`。
+- 验证记录：`go test -p 1 ./model -run '^TestFormatUserLogs' -count=1`、dashboard `bun run test`（39 项）和 `bun run build` 通过；`make verify-patches` 的 001–013 重放及定向测试通过，但临时 worktree 的双前端构建最终因资源/超时被 SIGTERM。
 - Keep `prd.md` focused on requirements, constraints, and acceptance criteria.
 - Lightweight tasks can remain PRD-only.
 - For complex tasks, add `design.md` for technical design and `implement.md` for execution planning before `task.py start`.

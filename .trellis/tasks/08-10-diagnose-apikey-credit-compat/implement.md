@@ -8,7 +8,6 @@
 6. 补充日志筛选/分页、token 限流、直连回退条件和 Worker IP 转发回归测试。
 7. 更新 `docs/customizations/001-api-key-self-service.md` 与 `patches/001-api-key-self-service.patch`。
 8. 运行 new-api 相关 Go 测试、task-dashboard Vitest/构建与 `make verify-patches`。
-9. 运行 `graphify update .`，复核差异中无调试输出。
 
 ## 上线验证
 

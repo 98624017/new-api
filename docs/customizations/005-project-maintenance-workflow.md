@@ -40,7 +40,7 @@
 - 上游 Docker workflow
   - 目标上游已经通过 `docker-build.yml` 和 `docker-image-branch.yml` 提供原生 amd64/arm64 多架构构建；旧的独立 alpha/arm64 workflow 不再恢复。
 - `.gitignore`
-  - 保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify`、Playwright CLI 与 gstack 目录、`meituapi/`、本地 API 参考文件和 Nginx 排障文档等验证/素材产物。
+  - 保留本地生成物忽略规则，包含 `.tmp-newapi-verify`、Playwright CLI 与 gstack 目录、`meituapi/`、本地 API 参考文件和 Nginx 排障文档等验证/素材产物。
 - `AGENTS.md`
   - 保留项目内 agent 工作约定。
 - `README.md` / `README.zh_CN.md`

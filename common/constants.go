@@ -118,6 +118,7 @@ var LogConsumeEnabled = true
 
 var TLSInsecureSkipVerify bool
 var TaskRefundRestoreTokenQuota bool
+var DistinguishLocalTokenQuotaError bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
 
 var SMTPServer = ""

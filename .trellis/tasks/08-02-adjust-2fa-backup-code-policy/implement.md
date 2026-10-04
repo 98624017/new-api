@@ -28,7 +28,6 @@
 - [x] 运行 Default type-check，以及两套前端受影响文件的格式与 lint。
 - [x] 构建 Default 和 Classic 前端。
 - [x] 运行 `git diff --check`。
-- [x] 运行 `graphify update .`；若仍受 HTML 节点规模限制，记录 AST 扫描结果与未产生图差异的事实。
 - [x] 在 120 秒外层限制下运行完整 `make verify-patches`。
 
 ## 5. 复核与回滚点
@@ -45,5 +44,4 @@
 - Default 完成 `typecheck`、受影响 TSX 的 oxfmt/oxlint；Classic 完成受影响 JSX 的 Prettier/ESLint。
 - Default 与 Classic 生产构建通过。
 - `git diff --check` 通过。
-- `graphify update .` 已完成 `2067/2067` 文件的 AST 扫描；HTML 可视化因 `11289` 个节点超出工具限制而未能重建。
 - `timeout 120s make verify-patches` 通过：001-012 依次重放、重放树一致性检查、双前端构建、Go 编译和定向回归均成功。

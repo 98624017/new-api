@@ -1,0 +1,102 @@
+diff --git a/common/constants.go b/common/constants.go
+index e80188ee..ee9cc516 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -118,6 +118,7 @@ var LogConsumeEnabled = true
+ 
+ var TLSInsecureSkipVerify bool
+ var TaskRefundRestoreTokenQuota bool
++var DistinguishLocalTokenQuotaError bool
+ var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
+ 
+ var SMTPServer = ""
+diff --git a/common/init.go b/common/init.go
+index d759f803..c1235277 100644
+--- a/common/init.go
++++ b/common/init.go
+@@ -88,6 +88,7 @@ func InitEnv() {
+ 	initNodeNameIdentity()
+ 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
+ 	TaskRefundRestoreTokenQuota = GetEnvOrDefaultBool("TASK_REFUND_RESTORE_TOKEN_QUOTA", false)
++	DistinguishLocalTokenQuotaError = GetEnvOrDefaultBool("DISTINGUISH_LOCAL_TOKEN_QUOTA_ERROR", false)
+ 	if TLSInsecureSkipVerify {
+ 		if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {
+ 			if tr.TLSClientConfig != nil {
+diff --git a/service/billing_session.go b/service/billing_session.go
+index 32344eaf..e6ede1ca 100644
+--- a/service/billing_session.go
++++ b/service/billing_session.go
+@@ -1,6 +1,7 @@
+ package service
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"strings"
+@@ -16,6 +17,9 @@ import (
+ 	"github.com/gin-gonic/gin"
+ )
+ 
++const localTokenQuotaInsufficientMessage = "本平台 API Key 额度不足，请充值或更换 Key"
++const localTokenQuotaInsufficientPrefix = "token quota is not enough"
++
+ // ---------------------------------------------------------------------------
+ // BillingSession — 统一计费会话
+ // ---------------------------------------------------------------------------
+@@ -198,7 +202,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
+ 	// ---- 1) 预扣令牌额度 ----
+ 	if effectiveQuota > 0 {
+ 		if err := PreConsumeTokenQuota(s.relayInfo, effectiveQuota); err != nil {
+-			return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++			return preConsumeTokenQuotaError(err)
+ 		}
+ 		s.tokenConsumed = effectiveQuota
+ 	}
+@@ -273,11 +277,18 @@ func (s *BillingSession) reserveToken(delta int) error {
+ 		return nil
+ 	}
+ 	if err := PreConsumeTokenQuota(s.relayInfo, delta); err != nil {
+-		return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++		return preConsumeTokenQuotaError(err)
+ 	}
+ 	return nil
+ }
+ 
++func preConsumeTokenQuotaError(err error) *types.NewAPIError {
++	if common.DistinguishLocalTokenQuotaError && strings.HasPrefix(err.Error(), localTokenQuotaInsufficientPrefix) {
++		err = errors.New(localTokenQuotaInsufficientMessage)
++	}
++	return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++}
++
+ // shouldTrust 统一信任额度检查，适用于钱包和订阅。
+ func (s *BillingSession) shouldTrust(c *gin.Context) bool {
+ 	// 异步任务（ForcePreConsume=true）必须预扣全额，不允许信任旁路
+diff --git a/service/error_test.go b/service/error_test.go
+index fb4635b6..069d6963 100644
+--- a/service/error_test.go
++++ b/service/error_test.go
+@@ -81,6 +81,22 @@ func TestTaskErrorWrapperMasksBillingAmounts(t *testing.T) {
+ 	require.Equal(t, http.StatusForbidden, taskErr.StatusCode)
+ }
+ 
++func TestPreConsumeTokenQuotaErrorMessageSwitch(t *testing.T) {
++	old := common.DistinguishLocalTokenQuotaError
++	t.Cleanup(func() { common.DistinguishLocalTokenQuotaError = old })
++
++	common.DistinguishLocalTokenQuotaError = false
++	original := preConsumeTokenQuotaError(errors.New("token quota is not enough"))
++	require.Equal(t, "token quota is not enough", original.Error())
++
++	common.DistinguishLocalTokenQuotaError = true
++	distinguished := preConsumeTokenQuotaError(errors.New("token quota is not enough"))
++	require.Equal(t, localTokenQuotaInsufficientMessage, distinguished.Error())
++	require.Equal(t, types.ErrorCodePreConsumeTokenQuotaFailed, distinguished.GetErrorCode())
++	require.Equal(t, http.StatusForbidden, distinguished.StatusCode)
++	require.Equal(t, "token lookup failed", preConsumeTokenQuotaError(errors.New("token lookup failed")).Error())
++}
++
+ func TestTaskErrorFromAPIErrorMasksBillingAmounts(t *testing.T) {
+ 	t.Parallel()
+ 

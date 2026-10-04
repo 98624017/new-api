@@ -97,6 +97,12 @@
 - 影响范围：普通用户日志序列化、task-dashboard 积分详情解析、后端与前端回归测试
 - 当前状态：已实现，并已生成 `patches/013-hide-credit-system-prompts.patch`
 
+### 014-distinguish-local-token-quota-error
+
+- 目标：通过环境变量开关将本地 API Key token 额度不足提示与上游渠道余额不足提示区分开
+- 影响范围：本地 token 预扣错误文案和相关回归测试；上游错误保持不变
+- 当前状态：已实现，并已生成 `patches/014-distinguish-local-token-quota-error.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`

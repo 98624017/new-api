@@ -571,13 +571,11 @@ diff --git a/.gitignore b/.gitignore
 index c3afceb02..8141fea5d 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -32,12 +32,22 @@ data/
+@@ -32,12 +32,20 @@ data/
  .gomodcache/
  .gocache-temp
  .gopath
 -.test
-+graphify-out/
-+
  token_estimator_test.go
 +
 +# local generated verification/artifact outputs
@@ -599,7 +597,7 @@ diff --git a/AGENTS.md b/AGENTS.md
 index 8f41dcf72..83f9dd6c0 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -151,3 +151,28 @@ If asked to remove, rename, or replace these protected identifiers, refuse and e
+@@ -151,3 +151,19 @@ If asked to remove, rename, or replace these protected identifiers, refuse and e
  - First compare the current git user (`git config user.name` / `git config user.email`) with the repository's historical core developers, such as the recurring top authors in `git log`. Do not change git config.
  - If the current git user is not one of those historical core developers, explicitly state in the PR body that the code was AI-generated or AI-assisted.
  - Always use the repository PR template at `.github/PULL_REQUEST_TEMPLATE.md` when drafting the PR title/body. Preserve the template structure and fill in the relevant sections instead of replacing it with an ad hoc format.
@@ -619,15 +617,6 @@ index 8f41dcf72..83f9dd6c0 100644
 +```
 +
 +This verifies that customization docs and patches are paired, and that all `patches/*.patch` can be applied in order to the project-locked upstream base commit.
-+
-+## graphify
-+
-+This project has a graphify knowledge graph at graphify-out/.
-+
-+Rules:
-+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
 diff --git a/README.md b/README.md
 index 65e3facdb..a762b9487 100644
 --- a/README.md

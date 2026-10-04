@@ -81,6 +81,22 @@ func TestTaskErrorWrapperMasksBillingAmounts(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, taskErr.StatusCode)
 }
 
+func TestPreConsumeTokenQuotaErrorMessageSwitch(t *testing.T) {
+	old := common.DistinguishLocalTokenQuotaError
+	t.Cleanup(func() { common.DistinguishLocalTokenQuotaError = old })
+
+	common.DistinguishLocalTokenQuotaError = false
+	original := preConsumeTokenQuotaError(errors.New("token quota is not enough"))
+	require.Equal(t, "token quota is not enough", original.Error())
+
+	common.DistinguishLocalTokenQuotaError = true
+	distinguished := preConsumeTokenQuotaError(errors.New("token quota is not enough"))
+	require.Equal(t, localTokenQuotaInsufficientMessage, distinguished.Error())
+	require.Equal(t, types.ErrorCodePreConsumeTokenQuotaFailed, distinguished.GetErrorCode())
+	require.Equal(t, http.StatusForbidden, distinguished.StatusCode)
+	require.Equal(t, "token lookup failed", preConsumeTokenQuotaError(errors.New("token lookup failed")).Error())
+}
+
 func TestTaskErrorFromAPIErrorMasksBillingAmounts(t *testing.T) {
 	t.Parallel()
 

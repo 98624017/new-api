@@ -342,7 +342,7 @@ Sora 适配器测试文件由后续共享该文件的 `007` 补丁首次创建�
 
 ### 4. `.gitignore`
 
-保留本地生成物忽略规则，包含 graphify 输出、`.tmp-newapi-verify`、Playwright CLI 与 gstack 目录、`meituapi/`、本地 API 参考文件和 Nginx 排障文档等验证/素材产物。
+保留本地生成物忽略规则，包含 `.tmp-newapi-verify`、Playwright CLI 与 gstack 目录、`meituapi/`、本地 API 参考文件和 Nginx 排障文档等验证/素材产物。
 
 ### 5. `AGENTS.md`
 
@@ -736,6 +736,19 @@ make verify-patches
 
 - `model/log.go`
 - `model/log_format_test.go`
+
+---
+
+## 014-distinguish-local-token-quota-error.patch
+
+**功能**：通过 `DISTINGUISH_LOCAL_TOKEN_QUOTA_ERROR`（默认关闭）区分本地 API Key token 额度不足与上游渠道余额不足的错误文案；上游错误保持不变。
+
+**涉及文件**：
+
+- `common/constants.go`
+- `common/init.go`
+- `service/billing_session.go`
+- `service/error_test.go`
 
 ---
 

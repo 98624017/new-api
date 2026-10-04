@@ -26,7 +26,6 @@
 
 - [x] 运行 classic 状态 API 定向测试。
 - [x] 运行 classic 生产构建。
-- [x] 运行 `graphify update .` 更新知识图谱（2,066 个文件的 AST 扫描完成；当前 Graphify 版本因 11,287 节点强制生成 HTML 而在可视化阶段失败，未产生图文件差异）。
 - [x] 运行 `timeout 120s make verify-patches`（冷缓存两次超时；预热同一 Go 缓存后完整通过）。
 - [x] 检查 `git diff --check` 与最终差异，确认没有调试代码、无关格式化或未登记源码改动。
 

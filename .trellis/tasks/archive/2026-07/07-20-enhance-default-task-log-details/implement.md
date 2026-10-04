@@ -32,7 +32,6 @@
 - [x] 对涉及文件执行格式检查和 lint。
 - [x] 运行 `bun run typecheck` 与 `bun run build`。
 - [x] 启动本地前端，通过浏览器检查桌面与移动视口、键盘操作、复制、长 JSON 滚动和空状态。
-- [x] 运行 `graphify update .`。
 - [x] 运行 `make verify-patches`，确认补丁链可重放及项目强制门禁通过。
 
 验证说明：已将 `.gitignore` 中遗漏的本地 API 参考文件、Nginx 排障文档和 `.gstack/` 规则同步到其所属的 `005-project-maintenance-workflow.patch`。旧版成功视频任务回归修复完成后，仓库根目录直接执行 `make verify-patches` 通过：001-010 重放一致、11 个前端测试、双前端构建、Go 全量编译及全部定向回归均成功。

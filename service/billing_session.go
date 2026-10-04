@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,6 +16,9 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 )
+
+const localTokenQuotaInsufficientMessage = "本平台 API Key 额度不足，请充值或更换 Key"
+const localTokenQuotaInsufficientPrefix = "token quota is not enough"
 
 // ---------------------------------------------------------------------------
 // BillingSession — 统一计费会话
@@ -198,7 +202,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 	// ---- 1) 预扣令牌额度 ----
 	if effectiveQuota > 0 {
 		if err := PreConsumeTokenQuota(s.relayInfo, effectiveQuota); err != nil {
-			return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+			return preConsumeTokenQuotaError(err)
 		}
 		s.tokenConsumed = effectiveQuota
 	}
@@ -273,9 +277,16 @@ func (s *BillingSession) reserveToken(delta int) error {
 		return nil
 	}
 	if err := PreConsumeTokenQuota(s.relayInfo, delta); err != nil {
-		return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+		return preConsumeTokenQuotaError(err)
 	}
 	return nil
+}
+
+func preConsumeTokenQuotaError(err error) *types.NewAPIError {
+	if common.DistinguishLocalTokenQuotaError && strings.HasPrefix(err.Error(), localTokenQuotaInsufficientPrefix) {
+		err = errors.New(localTokenQuotaInsufficientMessage)
+	}
+	return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 }
 
 // shouldTrust 统一信任额度检查，适用于钱包和订阅。

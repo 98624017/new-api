@@ -103,7 +103,6 @@
 
 ## 12. 收尾检查
 
-- [ ] 运行 `graphify update .`，确认知识图谱更新成功。
 - [ ] 再次执行 `make verify-patches`、关键测试和 Docker 健康检查。
 - [ ] 审计 `git diff upstream/main...HEAD`，确认只有 9 组定制、明确项目元数据和验证工具差异。
 - [ ] 编写升级/备份/回滚说明，强调数据库失败回滚需要恢复快照。

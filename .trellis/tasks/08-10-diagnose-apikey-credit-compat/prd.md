@@ -44,7 +44,7 @@
 - [ ] `DisplayTokenStatEnabled=true` 时，同一管理员下不同 API Key 展示各自的总额、已用和剩余额度。
 - [ ] 无效、禁用或未提供的 API Key 继续返回明确的鉴权错误。
 - [ ] 相关回归测试覆盖实际失败链路，并通过最小充分验证。
-- [ ] 若 new-api 有改动，`make verify-patches` 通过且运行 `graphify update .`。
+- [ ] 若 new-api 有改动，`make verify-patches` 通过。
 
 ## Out of Scope
 
