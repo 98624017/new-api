@@ -435,6 +435,11 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
 	switch info.RelayMode {
+	case relayconstant.RelayModeImagesGenerations:
+		if a.ChannelType == constant.ChannelTypeOpenAI {
+			request.UpstreamAspectRatio = request.Extra["aspect_ratio"]
+		}
+		return request, nil
 	case relayconstant.RelayModeImagesEdits:
 		if isJSONRequest(c) {
 			return request, nil

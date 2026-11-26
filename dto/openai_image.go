@@ -39,6 +39,8 @@ type ImageRequest struct {
 	WatermarkEnabled json.RawMessage `json:"watermark_enabled,omitempty"`
 	UserId           json.RawMessage `json:"user_id,omitempty"`
 	Image            json.RawMessage `json:"image,omitempty"`
+	// 由支持宽高比的渠道从 Extra 中选取，仅用于上游请求。
+	UpstreamAspectRatio json.RawMessage `json:"-"`
 	// 用匿名参数接收额外参数
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -86,13 +88,9 @@ func (r ImageRequest) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
-	// 不能合并ExtraFields！！！！！！！！
-	// 合并 ExtraFields
-	//for k, v := range r.Extra {
-	//	if _, exists := baseMap[k]; !exists {
-	//		baseMap[k] = v
-	//	}
-	//}
+	if len(r.UpstreamAspectRatio) > 0 {
+		baseMap["aspect_ratio"] = r.UpstreamAspectRatio
+	}
 
 	return common.Marshal(baseMap)
 }
