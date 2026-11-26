@@ -169,17 +169,20 @@ test_pids=()
 run_replay_check "验证 001/008 API Key 自助与任务接口" \
   go test ./controller -run '(TokenRedeem|GetUserTokenTask|GetLogByKey|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
 test_pids+=("$!")
-run_replay_check "验证 002/003/012 退款、金额脱敏与备用码" \
-  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes)' -count=1 &
+run_replay_check "验证 002/003/012/016 退款、金额脱敏、备用码、响应头超时与 Ali 轮询" \
+  go test ./common ./service ./types ./relay/channel/ali -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes|RelayResponseHeaderTimeout|AsyncImagePolling)' -count=1 &
 test_pids+=("$!")
 run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
   go test ./relay/channel/task/sora -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
 test_pids+=("$!")
-run_replay_check "验证 005 multipart 回归" \
-  go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -count=1 &
+run_replay_check "验证 005 multipart 与 015 参数覆盖审计预览" \
+  go test ./relay/common -run '^(TestValidateBasicTaskRequest_MultipartWithMetadata|TestParamOverrideAudit.*)$' -count=1 &
 test_pids+=("$!")
 run_replay_check "验证 006 双前端配置注入" \
   go test . -run '^TestInjectFrontendLockPassword' -count=1 &
+test_pids+=("$!")
+run_replay_check "验证 017 OpenAI 图片生成宽高比" \
+  go test ./relay/channel/openai -run '^TestImageGenerationAspectRatio$' -count=1 &
 test_pids+=("$!")
 wait_for_checks "定制定向测试失败" "${test_pids[@]}"
 

@@ -103,6 +103,27 @@
 - 影响范围：本地 token 预扣错误文案和相关回归测试；上游错误保持不变
 - 当前状态：已实现，并已生成 `patches/014-distinguish-local-token-quota-error.patch`
 
+### 015-param-override-audit-preview
+
+- 目标：将新日志中的参数覆盖审计限制为每值前 200 个 Unicode 字符、整个 `po` JSON 最多 1024 字节的预览
+- 影响范围：参数覆盖审计源头格式化、收集预算和回归测试；实际完整覆盖、渠道配置及历史日志不变
+- 对应补丁：`patches/015-param-override-audit-preview.patch`
+
+### 016-relay-response-header-timeout
+
+- 回移上游 #6949。直连、HTTP(S) 和 SOCKS5/SOCKS5H 代理的 relay 请求默认最多等 1800 秒响应头，Ali 异步生图轮询也使用渠道对应的客户端。
+- 对应补丁：`patches/016-relay-response-header-timeout.patch`
+
+### 017-openai-image-aspect-ratio
+
+- OpenAI 渠道关闭请求体透传时，仍会把图片生成请求显式提供的 `aspect_ratio` 发给上游。
+- 对应补丁：`patches/017-openai-image-aspect-ratio.patch`
+
+### 018-production-analysis-skill
+
+- 从 R2 数据库备份排查生产事件，按快照实际保留的字段、令牌认证入口和兑换流水核对结论。
+- 对应补丁：`patches/018-production-analysis-skill.patch`
+
 ## 上游同步标准流程
 
 1. 拉取并合并上游 `new-api`
@@ -125,9 +146,9 @@
 make verify-patches
 ```
 
-`make verify-patches` 会在临时 worktree 中按顺序重放 001-013，检查 patch
+`make verify-patches` 会在临时 worktree 中按顺序重放所有编号补丁，检查 patch
 所属文件与当前集成树一致，然后执行前端干净安装、共享锁屏测试、双前端构建、
-Go 全量编译和 9 组定向回归。每个编译或测试子命令最多运行 120 秒。
+Go 全量编译和定向回归。每个编译或测试子命令最多运行 120 秒。
 
 默认 patch 校验基准是当前项目锁定的原版 new-api：
 `7c28993f6bd9e92616f3f578212577f8b7c40b45`。验证其他上游基准时显式设置

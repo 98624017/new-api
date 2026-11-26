@@ -1,0 +1,525 @@
+diff --git a/.env.example b/.env.example
+index a63ed766..7a98593e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -58,6 +58,9 @@
+ # RELAY_TIMEOUT=0
+ # Relay HTTP 客户端空闲连接超时时间，单位秒，默认跟随 Go 标准库，设置为0表示不限制
+ # RELAY_IDLE_CONN_TIMEOUT=90
++# 等待上游响应头的秒数，默认 1800；0 表示不限时。收到响应头后不限制响应体读取。
++# 非流式模型可能在生成结束后才发响应头，请为这类请求留足时间。
++# RELAY_RESPONSE_HEADER_TIMEOUT=1800
+ # 流模式无响应超时时间，单位秒，如果出现空补全可以尝试改为更大值
+ # STREAMING_TIMEOUT=300
+ 
+diff --git a/README.md b/README.md
+index a762b948..570efbb9 100644
+--- a/README.md
++++ b/README.md
+@@ -334,6 +334,7 @@ Notes:
+ | `SQL_DSN` | Database connection string | - |
+ | `REDIS_CONN_STRING` | Redis connection string | - |
+ | `RELAY_IDLE_CONN_TIMEOUT` | Idle keep-alive timeout for relay HTTP clients, seconds. Defaults to Go standard library behavior; set `0` to disable | `90` |
++| `RELAY_RESPONSE_HEADER_TIMEOUT` | Seconds to wait for upstream response headers after sending a relay request; set `0` to disable. Does not limit streaming after headers arrive | `1800` |
+ | `STREAMING_TIMEOUT` | Streaming timeout (seconds) | `300` |
+ | `STREAM_SCANNER_MAX_BUFFER_MB` | Max per-line buffer (MB) for the stream scanner; increase when upstream sends huge image/base64 payloads | `64` |
+ | `MAX_REQUEST_BODY_MB` | Max request body size (MB, counted **after decompression**; prevents huge requests/zip bombs from exhausting memory). Exceeding it returns `413` | `32` |
+diff --git a/common/constants.go b/common/constants.go
+index ee9cc516..366e0019 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -188,6 +188,7 @@ var BatchUpdateInterval int
+ var RelayTimeout int // unit is second
+ 
+ var RelayIdleConnTimeout int // unit is second
++var RelayResponseHeaderTimeout time.Duration
+ var RelayMaxIdleConns int
+ var RelayMaxIdleConnsPerHost int
+ 
+diff --git a/common/init.go b/common/init.go
+index c1235277..067f549b 100644
+--- a/common/init.go
++++ b/common/init.go
+@@ -4,6 +4,7 @@ import (
+ 	"flag"
+ 	"fmt"
+ 	"log"
++	"math"
+ 	"net/http"
+ 	"os"
+ 	"path/filepath"
+@@ -115,6 +116,8 @@ func InitEnv() {
+ 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
+ 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
+ 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
++	headerSeconds := max(GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 1800), 0)
++	RelayResponseHeaderTimeout = time.Duration(min(int64(headerSeconds), math.MaxInt64/int64(time.Second))) * time.Second
+ 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
+ 	RelayMaxIdleConnsPerHost = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS_PER_HOST", 100)
+ 
+diff --git a/relay/channel/ali/image.go b/relay/channel/ali/image.go
+index af0717a3..1f657f39 100644
+--- a/relay/channel/ali/image.go
++++ b/relay/channel/ali/image.go
+@@ -1,12 +1,14 @@
+ package ali
+ 
+ import (
++	"context"
+ 	"encoding/base64"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+ 	"mime/multipart"
+ 	"net/http"
++	"net/url"
+ 	"strings"
+ 	"time"
+ 
+@@ -192,80 +194,66 @@ func oaiFormEdit2AliImageEdit(c *gin.Context, info *relaycommon.RelayInfo, reque
+ 	return &imageRequest, nil
+ }
+ 
+-func updateTask(info *relaycommon.RelayInfo, taskID string) (*AliResponse, error, []byte) {
+-	url := fmt.Sprintf("%s/api/v1/tasks/%s", info.ChannelBaseUrl, taskID)
+-
+-	var aliResponse AliResponse
+-
+-	req, err := http.NewRequest("GET", url, nil)
+-	if err != nil {
+-		return &aliResponse, err, nil
+-	}
+-
+-	req.Header.Set("Authorization", "Bearer "+info.ApiKey)
+-
+-	client := &http.Client{}
++func fetchImageTaskStatus(client *http.Client, req *http.Request) (*AliResponse, []byte, error) {
+ 	resp, err := client.Do(req)
+ 	if err != nil {
+-		common.SysLog("updateTask client.Do err: " + err.Error())
+-		return &aliResponse, err, nil
++		var requestErr *url.Error
++		if errors.As(err, &requestErr) {
++			err = requestErr.Err
++		}
++		return nil, nil, fmt.Errorf("send image task status request: %w", err)
+ 	}
+ 	defer resp.Body.Close()
+ 
+-	responseBody, err := io.ReadAll(resp.Body)
+-
+-	var response AliResponse
+-	err = common.Unmarshal(responseBody, &response)
++	body, err := io.ReadAll(resp.Body)
+ 	if err != nil {
+-		common.SysLog("updateTask NewDecoder err: " + err.Error())
+-		return &aliResponse, err, nil
++		return nil, nil, fmt.Errorf("read image task status response: %w", err)
+ 	}
+-
+-	return &response, nil, responseBody
++	var task AliResponse
++	if err := common.Unmarshal(body, &task); err != nil {
++		return nil, nil, fmt.Errorf("decode image task status response: %w", err)
++	}
++	return &task, body, nil
+ }
+ 
+ func asyncTaskWait(c *gin.Context, info *relaycommon.RelayInfo, taskID string) (*AliResponse, []byte, error) {
+-	waitSeconds := 10
+-	step := 0
+-	maxStep := 20
+-
+-	var taskResponse AliResponse
+-	var responseBody []byte
+-
+-	time.Sleep(time.Duration(5) * time.Second)
++	const maxAttempts = 20
++	const pollInterval = 10 * time.Second
++	client, err := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy)
++	if err != nil {
++		return nil, nil, errors.New("invalid Ali image task proxy configuration")
++	}
++	// 上游已接单，客户端断开后仍需取得终态以完成结算。
++	req, err := http.NewRequest(http.MethodGet, info.ChannelBaseUrl+"/api/v1/tasks/"+taskID, nil)
++	if err != nil {
++		return nil, nil, errors.New("invalid Ali image task status URL")
++	}
++	req.Header.Set("Authorization", "Bearer "+info.ApiKey)
+ 
+-	for {
+-		logger.LogDebug(c, "asyncTaskWait step %d/%d, wait %d seconds", step, maxStep, waitSeconds)
+-		step++
+-		rsp, err, body := updateTask(info, taskID)
+-		responseBody = body
++	delay := 5 * time.Second
++	for attempt := 1; attempt <= maxAttempts; attempt++ {
++		time.Sleep(delay)
++		delay = pollInterval
++		logger.LogDebug(c, "Ali image task poll %d/%d", attempt, maxAttempts)
++		task, body, err := fetchImageTaskStatus(client, req)
+ 		if err != nil {
+-			logger.LogWarn(c, "asyncTaskWait UpdateTask err: "+err.Error())
+-			time.Sleep(time.Duration(waitSeconds) * time.Second)
++			logger.LogWarn(c, fmt.Sprintf("Ali image task poll %d/%d: %s", attempt, maxAttempts, common.MaskSensitiveInfo(err.Error())))
++			if attempt == maxAttempts {
++				if errors.Is(err, context.DeadlineExceeded) {
++					return nil, nil, fmt.Errorf("Ali image task polling timed out after %d attempts: %w", attempt, context.DeadlineExceeded)
++				}
++				return nil, nil, fmt.Errorf("Ali image task status unavailable after %d attempts", attempt)
++			}
+ 			continue
+ 		}
+-
+-		if rsp.Output.TaskStatus == "" {
+-			return &taskResponse, responseBody, nil
+-		}
+-
+-		switch rsp.Output.TaskStatus {
+-		case "FAILED":
+-			fallthrough
+-		case "CANCELED":
+-			fallthrough
+-		case "SUCCEEDED":
+-			fallthrough
+-		case "UNKNOWN":
+-			return rsp, responseBody, nil
++		switch task.Output.TaskStatus {
++		case "":
++			return &AliResponse{}, body, nil
++		case "FAILED", "CANCELED", "SUCCEEDED", "UNKNOWN":
++			return task, body, nil
+ 		}
+-		if step >= maxStep {
+-			break
+-		}
+-		time.Sleep(time.Duration(waitSeconds) * time.Second)
+ 	}
+-
+-	return nil, nil, fmt.Errorf("aliAsyncTaskWait timeout")
++	return nil, nil, errors.New("aliAsyncTaskWait timeout")
+ }
+ 
+ func responseAli2OpenAIImage(c *gin.Context, response *AliResponse, originBody []byte, info *relaycommon.RelayInfo, responseFormat string) *dto.ImageResponse {
+@@ -312,9 +300,13 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
+ 		originRespBody = responseBody
+ 	} else {
+ 		// 异步图片模型需要轮询任务结果
+-		aliResponse, originRespBody, err = asyncTaskWait(c, info, aliTaskResponse.Output.TaskId)
++		taskID := aliTaskResponse.Output.TaskId
++		if taskID == "" {
++			return types.NewError(errors.New("missing task ID in Ali image response"), types.ErrorCodeBadResponse), nil
++		}
++		aliResponse, originRespBody, err = asyncTaskWait(c, info, taskID)
+ 		if err != nil {
+-			return types.NewError(err, types.ErrorCodeBadResponse), nil
++			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry()), nil
+ 		}
+ 		if aliResponse.Output.TaskStatus != "SUCCEEDED" {
+ 			return types.WithOpenAIError(types.OpenAIError{
+@@ -322,7 +314,7 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
+ 				Type:    "ali_error",
+ 				Param:   "",
+ 				Code:    aliResponse.Output.Code,
+-			}, resp.StatusCode), nil
++			}, resp.StatusCode, types.ErrOptionWithSkipRetry()), nil
+ 		}
+ 	}
+ 
+diff --git a/relay/channel/ali/image_polling_test.go b/relay/channel/ali/image_polling_test.go
+new file mode 100644
+index 00000000..7bca1471
+--- /dev/null
++++ b/relay/channel/ali/image_polling_test.go
+@@ -0,0 +1,100 @@
++package ali
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"testing/synctest"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/dto"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/types"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++type imageTaskRoundTrip func(*http.Request) (*http.Response, error)
++
++func (f imageTaskRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func TestAsyncImagePolling(t *testing.T) {
++	const proxyURL = "http://image-poll-proxy.test"
++	const result = `{"output":{"task_status":"SUCCEEDED"}}`
++	service.InitHttpClient()
++	t.Cleanup(service.ResetProxyClientCache)
++
++	for _, tc := range []struct {
++		name         string
++		proxy        string
++		failures     int
++		disconnected bool
++		wantAttempts int
++		wantTimeout  bool
++	}{
++		{name: "configured proxy retries and returns result", proxy: proxyURL, failures: 1, wantAttempts: 2},
++		{name: "direct timeouts exhaust retries", failures: 20, wantAttempts: 20, wantTimeout: true},
++		{name: "accepted task settles after disconnect", proxy: proxyURL, disconnected: true, wantAttempts: 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				recorder := httptest.NewRecorder()
++				c, _ := gin.CreateTestContext(recorder)
++				ctx, cancel := context.WithCancel(context.Background())
++				defer cancel()
++				c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/generations", nil)
++				if tc.disconnected {
++					cancel()
++				}
++				info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
++					ChannelSetting: dto.ChannelSettings{Proxy: tc.proxy},
++					ChannelBaseUrl: "http://127.0.0.1:0",
++					ApiKey:         "test-key",
++				}}
++				client, err := service.GetHttpClientWithProxy(tc.proxy)
++				require.NoError(t, err)
++				original := client.Transport
++				defer func() { client.Transport = original }()
++				attempts := 0
++				client.Transport = imageTaskRoundTrip(func(r *http.Request) (*http.Response, error) {
++					attempts++
++					assert.Equal(t, http.MethodGet, r.Method)
++					assert.Equal(t, "/api/v1/tasks/task-1", r.URL.Path)
++					assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
++					require.NoError(t, r.Context().Err())
++					if attempts <= tc.failures {
++						return nil, context.DeadlineExceeded
++					}
++					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(result))}, nil
++				})
++
++				accepted := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"output":{"task_id":"task-1"}}`))}
++				relayErr, usage := aliImageHandler(&Adaptor{}, c, accepted, info)
++				assert.Equal(t, tc.wantAttempts, attempts)
++				if tc.wantTimeout {
++					require.ErrorIs(t, relayErr, context.DeadlineExceeded)
++					assert.ErrorContains(t, relayErr, "after 20 attempts")
++					assert.True(t, types.IsSkipRetryError(relayErr))
++					return
++				}
++				require.Nil(t, relayErr)
++				require.NotNil(t, usage)
++				var response dto.ImageResponse
++				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
++				assert.JSONEq(t, result, string(response.Metadata))
++			})
++		})
++	}
++	t.Run("missing task ID keeps submission retry policy", func(t *testing.T) {
++		c, _ := gin.CreateTestContext(httptest.NewRecorder())
++		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"output":{}}`))}
++		relayErr, _ := aliImageHandler(&Adaptor{}, c, resp, &relaycommon.RelayInfo{})
++		require.NotNil(t, relayErr)
++		assert.False(t, types.IsSkipRetryError(relayErr))
++	})
++}
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+index 6a13d9f3..58b3de5c 100644
+--- a/scripts/verify_patches.sh
++++ b/scripts/verify_patches.sh
+@@ -169,8 +169,8 @@ test_pids=()
+ run_replay_check "验证 001/008 API Key 自助与任务接口" \
+   go test ./controller -run '(TokenRedeem|GetUserTokenTask|GetLogByKey|DeleteUserTokenAsset|ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+ test_pids+=("$!")
+-run_replay_check "验证 002/003/012 退款、金额脱敏与备用码" \
+-  go test ./common ./service ./types -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes)' -count=1 &
++run_replay_check "验证 002/003/012/016 退款、金额脱敏、备用码、响应头超时与 Ali 轮询" \
++  go test ./common ./service ./types ./relay/channel/ali -run '(RefundTaskQuota|CASGuarded|UpdateVideoTasks_FailureRefund|MaskBillingAmounts|MasksBillingAmounts|GenerateBackupCodes|RelayResponseHeaderTimeout|AsyncImagePolling)' -count=1 &
+ test_pids+=("$!")
+ run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
+   go test ./relay/channel/task/sora -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+diff --git a/service/http_client.go b/service/http_client.go
+index dd36db6c..227a5599 100644
+--- a/service/http_client.go
++++ b/service/http_client.go
+@@ -53,18 +53,23 @@ func ValidateSSRFProtectedFetchURL(urlStr string) error {
+ 	return validateURLWithCurrentFetchSetting(urlStr, true)
+ }
+ 
+-func InitHttpClient() {
++func newRelayHTTPTransport() *http.Transport {
+ 	transport := &http.Transport{
+-		MaxIdleConns:        common.RelayMaxIdleConns,
+-		MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
+-		IdleConnTimeout:     time.Duration(common.RelayIdleConnTimeout) * time.Second,
+-		ForceAttemptHTTP2:   true,
+-		Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY env vars
++		MaxIdleConns:          common.RelayMaxIdleConns,
++		MaxIdleConnsPerHost:   common.RelayMaxIdleConnsPerHost,
++		IdleConnTimeout:       time.Duration(common.RelayIdleConnTimeout) * time.Second,
++		ForceAttemptHTTP2:     true,
++		ResponseHeaderTimeout: common.RelayResponseHeaderTimeout,
+ 	}
+ 	if common.TLSInsecureSkipVerify {
+ 		transport.TLSClientConfig = common.InsecureTLSConfig
+ 	}
++	return transport
++}
+ 
++func InitHttpClient() {
++	transport := newRelayHTTPTransport()
++	transport.Proxy = http.ProxyFromEnvironment
+ 	if common.RelayTimeout == 0 {
+ 		httpClient = &http.Client{
+ 			Transport:     transport,
+@@ -143,16 +148,8 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
+ 
+ 	switch parsedURL.Scheme {
+ 	case "http", "https":
+-		transport := &http.Transport{
+-			MaxIdleConns:        common.RelayMaxIdleConns,
+-			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
+-			IdleConnTimeout:     time.Duration(common.RelayIdleConnTimeout) * time.Second,
+-			ForceAttemptHTTP2:   true,
+-			Proxy:               http.ProxyURL(parsedURL),
+-		}
+-		if common.TLSInsecureSkipVerify {
+-			transport.TLSClientConfig = common.InsecureTLSConfig
+-		}
++		transport := newRelayHTTPTransport()
++		transport.Proxy = http.ProxyURL(parsedURL)
+ 		client := &http.Client{
+ 			Transport:     transport,
+ 			CheckRedirect: checkRedirect,
+@@ -183,17 +180,9 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
+ 			return nil, err
+ 		}
+ 
+-		transport := &http.Transport{
+-			MaxIdleConns:        common.RelayMaxIdleConns,
+-			MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
+-			IdleConnTimeout:     time.Duration(common.RelayIdleConnTimeout) * time.Second,
+-			ForceAttemptHTTP2:   true,
+-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+-				return dialer.Dial(network, addr)
+-			},
+-		}
+-		if common.TLSInsecureSkipVerify {
+-			transport.TLSClientConfig = common.InsecureTLSConfig
++		transport := newRelayHTTPTransport()
++		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++			return dialer.Dial(network, addr)
+ 		}
+ 
+ 		client := &http.Client{Transport: transport, CheckRedirect: checkRedirect}
+diff --git a/service/http_client_timeout_test.go b/service/http_client_timeout_test.go
+new file mode 100644
+index 00000000..4478b65b
+--- /dev/null
++++ b/service/http_client_timeout_test.go
+@@ -0,0 +1,96 @@
++package service
++
++import (
++	"bufio"
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"os"
++	"os/exec"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestRelayResponseHeaderTimeout(t *testing.T) {
++	// 启动配置会修改进程级状态，子进程使用独立环境并关闭日志目录。
++	const childEnv = "NEWAPI_TEST_RELAY_RESPONSE_HEADER_TIMEOUT"
++	if os.Getenv(childEnv) != "1" {
++		cmd := exec.Command(os.Args[0], "-test.run=^TestRelayResponseHeaderTimeout$", "-log-dir=")
++		cmd.Env = []string{childEnv + "=1"}
++		output, err := cmd.CombinedOutput()
++		require.NoError(t, err, "%s", output)
++		return
++	}
++
++	for _, tc := range []struct {
++		name       string
++		env        string
++		timeout    time.Duration
++		headerWait time.Duration
++		wantErr    bool
++	}{
++		{"default times out", "", 30 * time.Minute, 31 * time.Minute, true},
++		{"late headers time out", "1", time.Second, 2 * time.Second, true},
++		{"slow body is not cut off", "1", time.Second, 0, false},
++		{"zero allows late headers", "0", 0, 2 * time.Second, false},
++		{"negative disables timeout", "-1", 0, 2 * time.Second, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Setenv("RELAY_RESPONSE_HEADER_TIMEOUT", tc.env)
++			common.InitEnv()
++			InitHttpClient()
++			t.Cleanup(ResetProxyClientCache)
++			for _, proxyURL := range []string{"http://proxy.test", "https://proxy.test", "socks5://proxy.test", "socks5h://proxy.test"} {
++				client, err := GetHttpClientWithProxy(proxyURL)
++				require.NoError(t, err)
++				transport, ok := client.Transport.(*http.Transport)
++				require.True(t, ok, "%s transport", proxyURL)
++				assert.Equal(t, tc.timeout, transport.ResponseHeaderTimeout, "%s", proxyURL)
++			}
++			synctest.Test(t, func(t *testing.T) {
++				client := GetHttpClient()
++				transport := client.Transport.(*http.Transport)
++				defer transport.CloseIdleConnections()
++				clientConn, upstream := net.Pipe()
++				done := make(chan struct{})
++				defer func() {
++					_ = clientConn.Close()
++					<-done
++				}()
++				transport.DialContext = func(context.Context, string, string) (net.Conn, error) { return clientConn, nil }
++				go func() {
++					defer close(done)
++					defer upstream.Close()
++					if _, err := http.ReadRequest(bufio.NewReader(upstream)); err != nil {
++						return
++					}
++					time.Sleep(tc.headerWait)
++					if _, err := io.WriteString(upstream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"); err != nil {
++						return
++					}
++					time.Sleep(3 * time.Second)
++					_, _ = io.WriteString(upstream, "ok")
++				}()
++
++				resp, err := client.Get("http://upstream.test")
++				if tc.wantErr {
++					var timeout net.Error
++					require.ErrorAs(t, err, &timeout)
++					assert.True(t, timeout.Timeout())
++					return
++				}
++				require.NoError(t, err)
++				defer resp.Body.Close()
++				body, err := io.ReadAll(resp.Body)
++				require.NoError(t, err)
++				assert.Equal(t, "ok", string(body))
++			})
++		})
++	}
++}

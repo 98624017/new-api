@@ -1,0 +1,276 @@
+diff --git a/.agents/skills/newapi-production-analysis/SKILL.md b/.agents/skills/newapi-production-analysis/SKILL.md
+new file mode 100644
+index 00000000..0556fac5
+--- /dev/null
++++ b/.agents/skills/newapi-production-analysis/SKILL.md
+@@ -0,0 +1,79 @@
++---
++name: newapi-production-analysis
++description: 从 R2 最新成功数据库备份只读排查生产 new-api。用于分析 API key 额度异常、兑换码或充值去向、消费与退款、异步任务和渠道故障；交叉核验数据库流水、管理审计与项目实现，输出可追溯的原因和影响范围。
++---
++
++# new-api 生产备份分析
++
++默认数据源是生产备份服务在 R2 发布的最新成功快照。先核验来源与完整性，再分析业务事件；把已证实的事实、可能原因和证据缺口分别说清楚。
++
++## 1. 确定问题和项目
++
++- 读取目标 `new-api` 仓库的 `AGENTS.md`，核对 `model/token.go`、`model/log.go` 等入口。当前目录不是该仓库时，定位正确仓库后再解释业务行为。
++- 从请求提取目标（key、用户、兑换码、任务、渠道或模型）、现象、时间范围和筛选条件。未给时间范围时先查目标全部保留记录；给了月份但未给年份时结合当前日期和备份时间确定并注明。
++- 时间默认使用用户当前时区；无可用时区时采用 `Asia/Shanghai` 并明示。把日/月区间转换为 UTC 的 `[开始, 下一日/月开始)`，保留“创建时间”与“兑换/消费时间”的区别。
++- “大于 1000”采用严格 `>`。金额阈值先确定币种和 quota 换算依据，名称只作为标签。
++
++完成条件：明确分析对象、时间与单位，已经确认业务代码所在仓库。能从现有配置查证的内容直接查证。
++
++## 2. 获取最新成功备份
++
++完整读取 [R2 备份获取流程](references/r2-backups.md)，按其中步骤获取并校验备份。
++
++- 每次新排查刷新 `full/latest.json`，用 manifest 固定本次快照。下载期间指针更新时，继续使用已固定的对象并记录抓取时间。
++- 用户明确指定历史对象或已有本地备份时使用指定来源，并标注历史快照；已有文件不自动替代本次最新备份。
++- 记录 bucket、完整 object key、`created_at`、文件大小、SHA-256、完整性结果及快照距当前时间的差值。按 manifest 的 `excluded_fields` 标明证据范围，旧快照缺少该声明时记为“未声明”。
++
++完成条件：已拿到对应实例的完整备份，大小、SHA-256 和压缩完整性均通过；或已明确说明缺少的访问配置/备份格式支持，不能把失败的下载当成数据源。
++
++## 3. 建立可复核的数据读取
++
++先完整读取 [数据分析约定](references/data-analysis.md)，再执行查询。
++
++- 从备份实际的建表声明、`COPY` 表头或数据库 schema 映射列名，读取版本信息和可用表；按本次问题选择关联表。
++- 默认流式解析压缩 SQL，合并同一轮独立统计，避免每条问题都完整扫描大文件。
++- 保存必要的查询条件、关联规则和聚合结果；原始密钥、兑换码和无关用户行留在受保护的原始备份中。
++- 需要复杂联查时可提出隔离副本方案；数据库恢复或结构/数据操作遵循当前用户和项目授权，确认目标为本地一次性实例后执行。分析事务使用只读模式。
++
++完成条件：字段按实际 schema 解释，解析无静默跳行，能说明时间覆盖、关联依据及缺失记录。
++
++## 4. 沿业务链验证原因
++
++按问题选用以下分支；每个分支同时检查数据和对应代码。
++
++| 问题 | 核查顺序 |
++| --- | --- |
++| key 额度变化 | 精确定位令牌 ID/所属用户 → 当前剩余及已用额度 → 消费与退款 → 指向令牌的兑换/充值 → 管理审计 → 资金与令牌更新路径 |
++| 兑换码/充值去向 | 创建者与兑换者、事件时间、状态 → 按兑换码/订单 ID 核实入账金额与去向 → 对照当前面额、创建审计与额度更新 |
++| 消费突增 | 每时段次数与扣费、模型与渠道 → 请求 ID、错误与任务结算关联 → IP/代理来源 → 计价和参数校验 |
++| 任务失败/退款 | task ID 与令牌 → 预扣、终态、差额结算/退款 → 钱包/订阅资金来源 → 是否恢复令牌额度、是否有重复结算 |
++| 模型/渠道故障 | 错误时间分布、渠道/模型 → 关联请求和任务 → 备份里的配置 → 适配器、路由和错误处理 |
++
++- 管理审计的日志归属用户可能是操作者；用 `other.op.params` 等字段识别目标资源。先确认生产版本的审计语义。
++- 金额异常沿输入/配置 → 计价 → quota 转换 → 预扣 → 结算/退款追踪；动态计价额外读取 `pkg/billingexpr/expr.md`。
++- 同时核查相反证据：例如退款是否确实属于目标令牌、同一兑换码是否出现多笔入账、名称与金额是否仅是标签差异。
++- 只有消费/错误记录时继续查没有 `token_id` 的充值和管理日志，不能据此断言没有加额。日志不完整时用兑换码/订单/任务记录交叉核验。
++- 记录仓库 commit 和可确认的生产版本。版本不一致或无法确认时，当前代码只用于解释候选机制，不能代替事发时的证据。
++
++完成条件：每项结论都有记录 ID、时间、关联字段或代码依据；未覆盖的层明确作为未知，不把累计字段与保留流水的差额直接判成异常。
++
++## 5. 交付与收尾
++
++默认用简体中文，先给结论，再给最小充分证据：
++
++1. 快照来源、截止时间、查询时区和范围。
++2. 事件数量、金额合计和目标；多笔事件用表格展示日期、记录 ID、名称、实际额度及去向。
++3. 可确认的触发事件、原因及影响；推测附上证据缺口和下一项验证。
++4. 数据或日志覆盖限制，必要时给出可复现的筛选与聚合条件。
++
++密钥默认只展示尾部少量字符或令牌 ID，不输出完整 key、兑换码内容、密码、访问凭证、完整 `other` 或请求载荷。IP 仅在来源分析需要时展示。
++
++本 Skill 授权范围为读取 R2 备份和本地分析。生产调额、撤销兑换、变更配置、重试真实请求、部署和修改 R2 对象均需相应的明确授权，分析请求本身不包含这些操作。
++
++完成后删除本次不再需要的下载和临时分析文件；需要继续排查时保留受保护的临时目录并给出路径和快照身份。可复用的查询应脱敏，原始备份及凭证不进入仓库。
++
++## 调用示例
++
++- `$newapi-production-analysis 查这把 key 最近一次额度增加的来源。`
++- `$newapi-production-analysis 查 2026 年 9 月金额 > 1000 USD 且兑换到 key 的兑换码，列名称、实际额度、兑换时间和去向。`
++- `$newapi-production-analysis 分析昨晚视频任务失败率和退款，确认有没有重复退款。`
+diff --git a/.agents/skills/newapi-production-analysis/references/data-analysis.md b/.agents/skills/newapi-production-analysis/references/data-analysis.md
+new file mode 100644
+index 00000000..1f2bf079
+--- /dev/null
++++ b/.agents/skills/newapi-production-analysis/references/data-analysis.md
+@@ -0,0 +1,64 @@
++# 备份数据读取和事件解释
++
++## 读取 SQL gzip
++
++先从解压流的头部确认数据库格式、服务端版本、`pg_dump` 版本和 schema。压缩文件必须经过 gzip 读取，不直接对 `.gz` 运行文本 `sed`/`rg`。大型备份优先单进程流式扫描，避免并发重复解压竞争资源。
++
++PostgreSQL plain SQL 的读取约定：
++
++- 按 `COPY schema.table (columns...) FROM stdin;` 的列名建立映射，每张表读取到独立的 `\.` 结束行；支持带引号的列名和实际 schema。
++- 数据先按实际 tab 分隔，再按 PostgreSQL COPY text 规则单次解码转义；字段为原始 `\N` 时才解释为 NULL。正确区分 `\\`、`\t`、`\n`、`\r`、其他 COPY 转义和转义后的字面量 `\N`。
++- `other`、设置和任务 JSON 在 COPY 解码后再做 JSON 解析。不要串联字符串替换，以免二次解释原本的字面反斜杠。
++- 明确区分 NULL、空字符串、整数零和布尔值。金额/quota 聚合使用整数或 Decimal，不经过浮点累加。
++- 行列数、UTF-8、数字或 JSON 不合法时报告表、行号和字段名，保持敏感原文不输出；不能用 `errors="replace"`、`except: continue` 或返回空对象掩盖解析失败。
++- 遇到 COPY CSV、二进制、自定义 dump 或非 PostgreSQL 备份时使用对应数据库工具/解析规则，不能套用上述 tab 格式。
++
++解析脚本是分析工具，不执行备份中的 SQL 或嵌入命令。复杂查询确需恢复时使用明确授权的隔离实例；绝不将 dump 的 `DROP`/`CREATE` 语句指向生产。不要启动 new-api 连接副本，因为启动可能执行 AutoMigrate、轮询任务或调用真实上游。
++
++## 目标关联
++
++用实际 schema 确认下列语义，并与本次代码版本交叉核验：
++
++| 数据 | 主要关联 |
++| --- | --- |
++| `tokens` | `id`、`user_id`、key 的完整精确匹配、name、remain/used quota、unlimited 标志 |
++| `logs` | user/token ID、type、created_at、quota、request/task ID、channel/model、`other` 中的结构化审计 |
++| `redemptions` | ID、快照时的 quota、status、created/redeemed_time、创建者 user_id、used_user_id |
++| 充值/订阅订单 | 订单/交易 ID、支付状态、金额、资金来源与回调/入账日志 |
++| 异步任务 | task ID、user ID、私有计费上下文里的 token ID、预扣额度、终态和结算 |
++
++按来源入口还原令牌主体，再与 `tokens.key` 做完整精确匹配。当前 relay 的 `TokenAuth` 去掉 Bearer 包装和可选的 `sk-` 后，以第一个 `-` 前的主体查库。管理员可在主体后附 `-<渠道ID>` 指定渠道。自助接口的 `TokenAuthReadOnly` 同样按主体查库，只读认证规则见 `middleware/auth.go`。已有数据库 key 用其存储原值匹配。查到行只确认令牌身份，请求是否成功还需核对入口权限与事发记录。报告只展示令牌 ID 或必要的脱敏标识。
++
++充值日志可能只有 content，没有 `token_id` 或 `quota`。优先按兑换码/订单 ID 关联记录，结构化审计优先于自然语言。在当前自助兑换实现里，日志会写入兑换码 ID 和“兑换到令牌「名称」”；名称可能重名或事后改名，只能证明记录当时的目标标签，不能据此强行关联唯一 key ID。
++
++批量兑换查询同时保留“已确认到令牌”“已确认到钱包”“去向未覆盖”三类计数，避免未匹配日志的记录被过滤后静默消失。按兑换码 ID 去重计数，另行检查多条入账日志；同名令牌合并金额只作为名称汇总，不称为确定的唯一 key 数量。
++
++## 额度与日志类型
++
++日志类型以对应生产版本 `model/log.go` 为准。当前定义可作为读取入口：
++
++| type | 语义 | 分析注意点 |
++| ---: | --- | --- |
++| 1 | 充值 | quota 字段可能为 0，金额/去向在内容或订单/兑换码中 |
++| 2 | 消费 | 正 quota 通常表示扣费量，不是余额增加；差额补扣也可能在此 |
++| 3 | 管理 | 审计归属操作者，目标在 op.params 等字段 |
++| 4 | 系统 | 可能是赠额，也可能只是验证/安全事件，逐条核实 |
++| 5 | 错误 | 不能单独判断是否发生预扣、退款或最终上游结果 |
++| 6 | 退款 | 核验 task/token、退还资金来源、恢复令牌开关和重复结算 |
++| 7 | 登录 | 用于必要的身份/来源交叉核验 |
++
++账户钱包和令牌限额分别更新，并不代表两次货币入账。核查 `model/redemption.go`、`model/token.go`、`model/user.go` 与 `service/task_billing.go` 中的实际资金路径。
++
++兑换码名称是自由标签。`redemptions.quota` 即使在兑换后也可修改，历史入账金额优先按带该兑换码 ID 的充值流水核实，保留日志的显示单位与精度。当前 `redemption.create` 审计只记录整批名称、数量和格式化面额，未列出每个兑换码 ID。同名批次缺少唯一关联时，将该码的创建面额及变更原因标为未知。确认应发面额后，再判断误发或计算差额。
++
++quota 转换读取 `common.QuotaPerUnit`、`logger.LogQuota` 和币种展示设置；当前日志显示的币种还受配置影响。按单位过滤并同时保留原始 quota。历史配置未知时注明换算依据，不能从名称猜金额或把所有货币符号当 USD。
++
++## 证据强度与覆盖
++
++- 明确列出查询区间实际覆盖的最早/最晚记录，以及是否配置独立日志库、ClickHouse、关闭消费日志或有清理策略。主库 dump 可能不含生产日志库。
++- 当前 `used_quota` 是累计字段，保留消费日志只是可见区间；差额也可能涉及其他计费路径或调整。`remain_quota + used_quota` 本身不证明初始授额或完整入账历史。
++- request ID 唯一只证明日志关联标识不同，不能证明调用来自不同人、上游一定成功或没有重复业务任务。真正结果需结合状态、错误和结算事件。
++- IP 可能来自代理、云出口或转发头。结合可信代理配置分析来源，不能因多 IP 就认定泄露/滥用。
++- 快照证实的是备份时保存的状态；单个快照不能恢复未留审计的全部历史余额，也不能回答快照之后的事件。
++
++报告至少核对明细笔数、按记录 ID 去重笔数、总 quota 与分组汇总是否一致。指出疑似异常时说明相反证据和未确认事项。
+diff --git a/.agents/skills/newapi-production-analysis/references/r2-backups.md b/.agents/skills/newapi-production-analysis/references/r2-backups.md
+new file mode 100644
+index 00000000..bf48dbe3
+--- /dev/null
++++ b/.agents/skills/newapi-production-analysis/references/r2-backups.md
+@@ -0,0 +1,115 @@
++# R2 最新备份获取
++
++## 配置与访问
++
++优先从当前项目明确指定的生产配置、备份服务配置、受保护环境变量或已认证的 Cloudflare profile 查证账户、bucket 和 prefix。只查询所需配置，输出配置项是否可用，不回显凭证。
++
++备份实现的来源是同级 `newapibackup` 仓库：读取其 `README.md`、`internal/backup/manifest.go` 和上传逻辑。当前工作区可通过 `/root/projects/newapibackup/` 查阅；路径不存在时定位实际备份服务仓库。
++
++该实现使用这些配置名：
++
++| 配置 | 用途 |
++| --- | --- |
++| `R2_BUCKET_NAME` | 备份桶 |
++| `R2_PREFIX` | 实例前缀，空值代表 bucket 根目录 |
++| `R2_ACCOUNT_ID` | S3 endpoint 中的账户 ID |
++| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | S3 访问凭证 |
++| `BACKUP_NAME` | manifest 中的实例名称 |
++
++Wrangler 使用已认证 profile 或现有 `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`；R2 S3 access key 不能当作 Wrangler API token 使用。已有工具可读对象时直接复用，权限不足时只询问对应实例的配置来源或已授权的认证方式，不要求用户在聊天粘贴密钥。
++
++本项目生产入口已于 2026-10-08 通过 R2 桶列表和 manifest 实测确认：
++
++| 配置 | 已核验值 |
++| --- | --- |
++| Cloudflare account ID | `b90e43483db7d824b74157de8bf5c718` |
++| bucket | `xinbaoapi` |
++| prefix | 空字符串（bucket 根目录） |
++| latest object | `full/latest.json` |
++| manifest name | `newapi` |
++
++未提供覆盖配置时使用这个入口，并核对当前认证账户与 manifest 身份。已有环境变量或明确的新生产配置优先，配置改变时重新验证。`R2_PREFIX` 为空是有效配置，不作为缺失项。
++
++README 的 `newapi/full/latest.json` 是示例；实测在本桶不存在，不能自动将项目名用作 prefix。当前机器的 Wrangler OAuth 已能读取该桶，即使 R2/S3 环境变量未设置也可直接沿用认证。
++
++## 最新成功快照合同
++
++按实际 prefix 拼接以下对象路径，去掉 prefix 首尾斜杠：
++
++```text
++<prefix>/full/latest.json
++<prefix>/full/YYYY/MM/<backup-name>-backup-YYYYMMDD-HHMMSS.sql.gz
++<backup-object>.json
++```
++
++prefix 为空时从 `full/` 开始。当前备份实现先上传 SQL gzip，再上传同名 manifest，最后更新 `latest.json`；因此优先读取这个发布指针，避免依赖对象列表顺序或文件名猜测。
++
++下面是 manifest v1 的示例。
++
++```json
++{
++  "schema_version": 1,
++  "name": "newapi",
++  "created_at": "2026-05-08T00:30:00Z",
++  "object": "newapi/full/2026/05/newapi-backup-20260508-003000.sql.gz",
++  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++  "size": 16984003,
++  "format": "plain sql gzip",
++  "excluded_fields": ["public.logs.other.po"]
++}
++```
++
++读取后验证 schema/version、格式、实例名称、有效带时区的时间、正整数大小、64 位十六进制 SHA-256，以及 object 位于已确认的实例 `full/` 前缀内。同名 manifest 与固定的 latest manifest 应具有一致的对象、大小和 hash。格式/版本改变时先查最新实现，不能把其他格式当作 SQL gzip。
++
++读取该快照可选的 `excluded_fields` 字符串数组，在报告里列出声明排除的字段。当前导出器会从 `public.logs.other` 删除 `po`，因此这类快照无法判定某次请求是否有参数覆盖审计。旧 manifest 缺少此声明时，将排除范围记作“未声明”，结合当时的导出实现和可见记录判断字段覆盖。
++
++`latest.json` 缺失或损坏时，用现有 S3 列举工具读取同一实例的完整备份和同名 manifest，分页枚举后按有效 `created_at` 选择最新可完整校验对象；记录降级选择。只有 Wrangler 而无法列举时查可用 API/连接器或报告缺少的工具能力，不虚构 `r2 object list` 命令。
++
++快照超过配置的备份间隔时报告延迟，仍可分析该快照覆盖的数据；快照之后的事件明确不在证据范围内。不要自动触发生产备份任务。
++
++## 下载和校验
++
++优先使用已认证的 Wrangler；运行前查本机 `wrangler r2 object get --help`，涉及版本差异时参考官方文档：
++https://developers.cloudflare.com/workers/wrangler/commands/#r2-object-get
++
++以下 Bash 示例使用已核验的本项目默认入口，允许明确配置覆盖。认证账户先核对上述 account ID。项目要求 RTK 时保留前缀，其他环境使用实际可用工具。
++
++```bash
++NEWAPI_ANALYSIS_DIR="$(rtk proxy mktemp -d /tmp/newapi-analysis.XXXXXX)"
++rtk chmod 700 "$NEWAPI_ANALYSIS_DIR"
++NEWAPI_R2_BUCKET="${R2_BUCKET_NAME:-xinbaoapi}"
++NEWAPI_R2_PREFIX="${R2_PREFIX:-}"
++NEWAPI_R2_PREFIX="${NEWAPI_R2_PREFIX#/}"
++NEWAPI_R2_PREFIX="${NEWAPI_R2_PREFIX%/}"
++NEWAPI_FULL_PREFIX="${NEWAPI_R2_PREFIX:+$NEWAPI_R2_PREFIX/}full/"
++rtk wrangler r2 object get \
++  "${NEWAPI_R2_BUCKET}/${NEWAPI_FULL_PREFIX}latest.json" \
++  --remote --cwd "$NEWAPI_ANALYSIS_DIR" \
++  --file "$NEWAPI_ANALYSIS_DIR/latest.json"
++```
++
++在专用目录运行可避免加载无关项目的 Wrangler 配置。认证核验和桶探测也使用 `--cwd "$NEWAPI_ANALYSIS_DIR"`，避免在仓库生成 `.wrangler/` 缓存。需要指定 profile 时沿用已确认的 `--profile`，账户信息从既有安全环境注入。
++
++完成前述 manifest 验证后再读取 object 并下载，固定使用本地 `backup.sql.gz` 文件名：
++
++```bash
++NEWAPI_BACKUP_OBJECT="$(rtk proxy jq -r '.object' "$NEWAPI_ANALYSIS_DIR/latest.json")"
++rtk wrangler r2 object get \
++  "${NEWAPI_R2_BUCKET}/${NEWAPI_BACKUP_OBJECT}.json" \
++  --remote --cwd "$NEWAPI_ANALYSIS_DIR" \
++  --file "$NEWAPI_ANALYSIS_DIR/object-manifest.json"
++rtk wrangler r2 object get \
++  "${NEWAPI_R2_BUCKET}/${NEWAPI_BACKUP_OBJECT}" \
++  --remote --cwd "$NEWAPI_ANALYSIS_DIR" \
++  --file "$NEWAPI_ANALYSIS_DIR/backup.sql.gz"
++rtk chmod 600 "$NEWAPI_ANALYSIS_DIR/backup.sql.gz"
++rtk proxy stat -c '%s' "$NEWAPI_ANALYSIS_DIR/backup.sql.gz"
++rtk sha256sum "$NEWAPI_ANALYSIS_DIR/backup.sql.gz"
++rtk gzip -t "$NEWAPI_ANALYSIS_DIR/backup.sql.gz"
++```
++
++把 stat 和 SHA-256 输出分别与 manifest 的 `size` / `sha256` 精确比较，再确认 gzip 校验成功。任一不一致都停止分析，重新获取或报告损坏；不能只运行命令而不比较结果。
++
++已有 AWS CLI 和 S3 凭证时，也可使用 `aws s3 cp --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"` 读取同一对象。沿用安全环境/profile，将 R2 凭证映射到 AWS 所需环境变量而不打印值；不修改持久认证配置。
++
++下载前检查磁盘空间，下载期间限制等待以便报告进度。已有本地缓存只有在最新指针仍指向同一 object 且大小、hash、gzip 校验一致时可复用。原始备份只保存在权限受限的临时目录。

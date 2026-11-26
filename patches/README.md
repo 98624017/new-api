@@ -25,7 +25,7 @@ make verify-patches
 - `patches/README.md` 与 `docs/customizations/README.md` 是否登记了对应二开
 - 所有 patch 是否能按编号顺序应用到当前项目锁定的原版 new-api 基准 `7c28993f6bd9e92616f3f578212577f8b7c40b45`
 - patch 所属文件在重放树中是否与当前集成树逐字一致
-- 重放树是否能完成前端干净安装、共享锁屏测试、default/classic 构建、Go 编译和 9 组定向回归
+- 重放树是否能完成前端干净安装、共享锁屏测试、default/classic 构建、Go 编译和定向回归
 - 当前工作区如果有源码改动，是否同步修改了至少一个 `patches/*.patch`
 
 ### 自动应用（推荐先尝试）
@@ -751,6 +751,38 @@ make verify-patches
 - `service/error_test.go`
 
 ---
+
+## 015-param-override-audit-preview.patch
+
+**功能**：将新日志的 `other.po` 参数覆盖审计限制为每值前 200 个 Unicode 字符、整个数组 JSON 最多 1024 字节的预览。保留 `string[]` 和操作文本格式，不附加长度、截断标志或省略号；整体预算可进一步缩短最后预览，之后停止收集审计。实际完整覆盖、渠道配置和历史日志不变，DEBUG 同样受限。
+
+**涉及文件（4 个）**：
+
+- `relay/common/override.go`：接入审计格式化及替换类 `from` / `to` 预览，保留操作类型和字段路径。
+- `relay/common/override_audit.go`：在源头生成有界预览并控制整体 JSON 字节预算，沿用预览去重逻辑。
+- `relay/common/override_audit_test.go`：验证预览限制、Unicode、转义字节预算，以及完整覆盖仍执行。
+- `scripts/verify_patches.sh`：将预览回归加入现有同组 Go 回归验证。
+
+### 回归验证
+
+```bash
+go test ./relay/common ./service ./model
+timeout 120s make verify-patches
+```
+
+---
+
+## 016-relay-response-header-timeout.patch
+
+回移上游 #6949，并让 Ali 异步生图轮询使用渠道对应的 HTTP 客户端。补丁冲突时，依次恢复 `common/init.go` 的启动配置、`service/http_client.go` 的直连与代理 transport、`relay/channel/ali/image.go` 的轮询，再恢复测试和环境变量说明。详见 [016 手动恢复与验证](../docs/customizations/016-relay-response-header-timeout.md)。
+
+## 017-openai-image-aspect-ratio.patch
+
+OpenAI 图片生成请求在关闭请求体透传时也支持显式 `aspect_ratio`。涉及文件和恢复步骤见 [017 文档](../docs/customizations/017-openai-image-aspect-ratio.md)。
+
+## 018-production-analysis-skill.patch
+
+将生产备份排查手册纳入补丁重放。手动恢复时，将 `SKILL.md`、`references/r2-backups.md` 和 `references/data-analysis.md` 放回 `.agents/skills/newapi-production-analysis/`，核对入口中的两条相对链接，再执行 `make verify-patches`。详见 [018 验证说明](../docs/customizations/018-production-analysis-skill.md)。
 
 ## 补丁维护规范
 

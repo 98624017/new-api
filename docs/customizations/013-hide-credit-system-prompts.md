@@ -11,7 +11,7 @@
 - 普通用户和 API key 自助日志不返回 `other.po`。
 - 保留额度、token、退款和公开计费元数据。
 - dashboard 在前端再次过滤 `po`，兼容后端旧响应或缓存数据。
-- 管理员日志仍可查看完整参数覆盖审计，方便排障。
+- 管理员日志仍可查看已记录的参数覆盖审计，方便排障；新日志的值预览和整体大小限制见 [015-param-override-audit-preview](015-param-override-audit-preview.md)。
 
 ## 3. 实现范围
 

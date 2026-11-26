@@ -42,10 +42,6 @@ var paramOverrideSensitivePathPrefixes = []string{
 	"system_instruction",
 }
 
-type paramOverrideAuditRecorder struct {
-	lines []string
-}
-
 type ConditionOperation struct {
 	Path           string      `json:"path"`             // JSON路径
 	Mode           string      `json:"mode"`             // full, prefix, suffix, contains, gt, gte, lt, lte
@@ -240,20 +236,6 @@ func getParamOverrideAuditRecorder(context map[string]interface{}) *paramOverrid
 	return recorder
 }
 
-func (r *paramOverrideAuditRecorder) recordOperation(mode, path, from, to string, value interface{}) {
-	if r == nil {
-		return
-	}
-	line := buildParamOverrideAuditLine(mode, path, from, to, value)
-	if line == "" {
-		return
-	}
-	if lo.Contains(r.lines, line) {
-		return
-	}
-	r.lines = append(r.lines, line)
-}
-
 func shouldAuditParamPath(path string) bool {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -282,22 +264,9 @@ func shouldAuditOperation(mode, path, from, to string) bool {
 	return false
 }
 
-func formatParamOverrideAuditValue(value interface{}) string {
-	switch typed := value.(type) {
-	case nil:
-		return "<empty>"
-	case string:
-		return typed
-	default:
-		return common.GetJsonString(typed)
-	}
-}
-
-func buildParamOverrideAuditLine(mode, path, from, to string, value interface{}) string {
+func buildParamOverrideAuditLine(mode, path, from, to string, value interface{}, valueMaxRunes int) string {
 	mode = strings.TrimSpace(mode)
 	path = strings.TrimSpace(path)
-	from = strings.TrimSpace(from)
-	to = strings.TrimSpace(to)
 
 	if !shouldAuditOperation(mode, path, from, to) {
 		return ""
@@ -308,37 +277,34 @@ func buildParamOverrideAuditLine(mode, path, from, to string, value interface{})
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("set %s = %s", path, formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("set %s = %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "delete":
 		if path == "" {
 			return ""
 		}
 		return fmt.Sprintf("delete %s", path)
-	case "copy":
+	case "copy", "move", "copy_header", "move_header", "sync_fields":
+		from = strings.TrimSpace(from)
+		to = strings.TrimSpace(to)
 		if from == "" || to == "" {
 			return ""
 		}
-		return fmt.Sprintf("copy %s -> %s", from, to)
-	case "move":
-		if from == "" || to == "" {
-			return ""
-		}
-		return fmt.Sprintf("move %s -> %s", from, to)
+		return fmt.Sprintf("%s %s -> %s", mode, from, to)
 	case "prepend":
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("prepend %s with %s", path, formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("prepend %s with %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "append":
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("append %s with %s", path, formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("append %s with %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "trim_prefix", "trim_suffix", "ensure_prefix", "ensure_suffix":
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("%s %s with %s", mode, path, formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("%s %s with %s", mode, path, formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "trim_space", "to_lower", "to_upper":
 		if path == "" {
 			return ""
@@ -348,31 +314,22 @@ func buildParamOverrideAuditLine(mode, path, from, to string, value interface{})
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("%s %s from %s to %s", mode, path, from, to)
+		return fmt.Sprintf("%s %s from %s to %s", mode, path,
+			paramOverrideAuditPrefix(from, valueMaxRunes), paramOverrideAuditPrefix(to, valueMaxRunes))
 	case "set_header":
 		if path == "" {
 			return ""
 		}
-		return fmt.Sprintf("set_header %s = %s", path, formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("set_header %s = %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "delete_header":
 		if path == "" {
 			return ""
 		}
 		return fmt.Sprintf("delete_header %s", path)
-	case "copy_header", "move_header":
-		if from == "" || to == "" {
-			return ""
-		}
-		return fmt.Sprintf("%s %s -> %s", mode, from, to)
 	case "pass_headers":
-		return fmt.Sprintf("pass_headers %s", formatParamOverrideAuditValue(value))
-	case "sync_fields":
-		if from == "" || to == "" {
-			return ""
-		}
-		return fmt.Sprintf("sync_fields %s -> %s", from, to)
+		return fmt.Sprintf("pass_headers %s", formatParamOverrideAuditValue(value, valueMaxRunes))
 	case "return_error":
-		return fmt.Sprintf("return_error %s", formatParamOverrideAuditValue(value))
+		return fmt.Sprintf("return_error %s", formatParamOverrideAuditValue(value, valueMaxRunes))
 	default:
 		if path == "" {
 			return mode

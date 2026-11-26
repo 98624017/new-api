@@ -1,0 +1,102 @@
+diff --git a/dto/openai_image.go b/dto/openai_image.go
+index 275fd555..e91eedd0 100644
+--- a/dto/openai_image.go
++++ b/dto/openai_image.go
+@@ -39,6 +39,8 @@ type ImageRequest struct {
+ 	WatermarkEnabled json.RawMessage `json:"watermark_enabled,omitempty"`
+ 	UserId           json.RawMessage `json:"user_id,omitempty"`
+ 	Image            json.RawMessage `json:"image,omitempty"`
++	// 由支持宽高比的渠道从 Extra 中选取，仅用于上游请求。
++	UpstreamAspectRatio json.RawMessage `json:"-"`
+ 	// 用匿名参数接收额外参数
+ 	Extra map[string]json.RawMessage `json:"-"`
+ }
+@@ -86,13 +88,9 @@ func (r ImageRequest) MarshalJSON() ([]byte, error) {
+ 		return nil, err
+ 	}
+ 
+-	// 不能合并ExtraFields！！！！！！！！
+-	// 合并 ExtraFields
+-	//for k, v := range r.Extra {
+-	//	if _, exists := baseMap[k]; !exists {
+-	//		baseMap[k] = v
+-	//	}
+-	//}
++	if len(r.UpstreamAspectRatio) > 0 {
++		baseMap["aspect_ratio"] = r.UpstreamAspectRatio
++	}
+ 
+ 	return common.Marshal(baseMap)
+ }
+diff --git a/relay/channel/openai/adaptor.go b/relay/channel/openai/adaptor.go
+index e1182523..65dc69b0 100644
+--- a/relay/channel/openai/adaptor.go
++++ b/relay/channel/openai/adaptor.go
+@@ -435,6 +435,11 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
+ 
+ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+ 	switch info.RelayMode {
++	case relayconstant.RelayModeImagesGenerations:
++		if a.ChannelType == constant.ChannelTypeOpenAI {
++			request.UpstreamAspectRatio = request.Extra["aspect_ratio"]
++		}
++		return request, nil
+ 	case relayconstant.RelayModeImagesEdits:
+ 		if isJSONRequest(c) {
+ 			return request, nil
+diff --git a/relay/channel/openai/image_generation_test.go b/relay/channel/openai/image_generation_test.go
+new file mode 100644
+index 00000000..07c83b18
+--- /dev/null
++++ b/relay/channel/openai/image_generation_test.go
+@@ -0,0 +1,41 @@
++package openai
++
++import (
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/dto"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	relayconstant "github.com/QuantumNous/new-api/relay/constant"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestImageGenerationAspectRatio(t *testing.T) {
++	const fields = `"model":"seedream-5.5","prompt":"产品摄影","size":"2K","n":1,"watermark":false,"image":["https://example.com/product.png"]`
++	for _, tc := range []struct {
++		name        string
++		channelType int
++		extra       string
++		wantExtra   string
++	}{
++		{"explicit ratio", constant.ChannelTypeOpenAI, `,"aspect_ratio":"9:16","unknown":true`, `,"aspect_ratio":"9:16"`},
++		{"omitted ratio", constant.ChannelTypeOpenAI, "", ""},
++		{"other channel", constant.ChannelTypeAzure, `,"aspect_ratio":"9:16"`, ""},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var request dto.ImageRequest
++			require.NoError(t, common.UnmarshalJsonStr("{"+fields+tc.extra+"}", &request))
++			copied, err := common.DeepCopy(&request)
++			require.NoError(t, err)
++
++			adaptor := Adaptor{ChannelType: tc.channelType}
++			converted, err := adaptor.ConvertImageRequest(nil, &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations}, *copied)
++			require.NoError(t, err)
++			upstream, err := common.Marshal(converted)
++			require.NoError(t, err)
++			assert.JSONEq(t, "{"+fields+tc.wantExtra+"}", string(upstream))
++		})
++	}
++}
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+--- a/scripts/verify_patches.sh
++++ b/scripts/verify_patches.sh
+@@ -183,2 +183,5 @@ run_replay_check "验证 006 双前端配置注入" \
+ test_pids+=("$!")
++run_replay_check "验证 017 OpenAI 图片生成宽高比" \
++  go test ./relay/channel/openai -run '^TestImageGenerationAspectRatio$' -count=1 &
++test_pids+=("$!")
+ wait_for_checks "定制定向测试失败" "${test_pids[@]}"

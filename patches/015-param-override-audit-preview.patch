@@ -1,0 +1,577 @@
+diff --git a/relay/common/override.go b/relay/common/override.go
+index db59482a..f8ef1977 100644
+--- a/relay/common/override.go
++++ b/relay/common/override.go
+@@ -42,10 +42,6 @@ var paramOverrideSensitivePathPrefixes = []string{
+ 	"system_instruction",
+ }
+ 
+-type paramOverrideAuditRecorder struct {
+-	lines []string
+-}
+-
+ type ConditionOperation struct {
+ 	Path           string      `json:"path"`             // JSON路径
+ 	Mode           string      `json:"mode"`             // full, prefix, suffix, contains, gt, gte, lt, lte
+@@ -240,20 +236,6 @@ func getParamOverrideAuditRecorder(context map[string]interface{}) *paramOverrid
+ 	return recorder
+ }
+ 
+-func (r *paramOverrideAuditRecorder) recordOperation(mode, path, from, to string, value interface{}) {
+-	if r == nil {
+-		return
+-	}
+-	line := buildParamOverrideAuditLine(mode, path, from, to, value)
+-	if line == "" {
+-		return
+-	}
+-	if lo.Contains(r.lines, line) {
+-		return
+-	}
+-	r.lines = append(r.lines, line)
+-}
+-
+ func shouldAuditParamPath(path string) bool {
+ 	path = strings.TrimSpace(path)
+ 	if path == "" {
+@@ -282,22 +264,9 @@ func shouldAuditOperation(mode, path, from, to string) bool {
+ 	return false
+ }
+ 
+-func formatParamOverrideAuditValue(value interface{}) string {
+-	switch typed := value.(type) {
+-	case nil:
+-		return "<empty>"
+-	case string:
+-		return typed
+-	default:
+-		return common.GetJsonString(typed)
+-	}
+-}
+-
+-func buildParamOverrideAuditLine(mode, path, from, to string, value interface{}) string {
++func buildParamOverrideAuditLine(mode, path, from, to string, value interface{}, valueMaxRunes int) string {
+ 	mode = strings.TrimSpace(mode)
+ 	path = strings.TrimSpace(path)
+-	from = strings.TrimSpace(from)
+-	to = strings.TrimSpace(to)
+ 
+ 	if !shouldAuditOperation(mode, path, from, to) {
+ 		return ""
+@@ -308,37 +277,34 @@ func buildParamOverrideAuditLine(mode, path, from, to string, value interface{})
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("set %s = %s", path, formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("set %s = %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "delete":
+ 		if path == "" {
+ 			return ""
+ 		}
+ 		return fmt.Sprintf("delete %s", path)
+-	case "copy":
++	case "copy", "move", "copy_header", "move_header", "sync_fields":
++		from = strings.TrimSpace(from)
++		to = strings.TrimSpace(to)
+ 		if from == "" || to == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("copy %s -> %s", from, to)
+-	case "move":
+-		if from == "" || to == "" {
+-			return ""
+-		}
+-		return fmt.Sprintf("move %s -> %s", from, to)
++		return fmt.Sprintf("%s %s -> %s", mode, from, to)
+ 	case "prepend":
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("prepend %s with %s", path, formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("prepend %s with %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "append":
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("append %s with %s", path, formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("append %s with %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "trim_prefix", "trim_suffix", "ensure_prefix", "ensure_suffix":
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("%s %s with %s", mode, path, formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("%s %s with %s", mode, path, formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "trim_space", "to_lower", "to_upper":
+ 		if path == "" {
+ 			return ""
+@@ -348,31 +314,22 @@ func buildParamOverrideAuditLine(mode, path, from, to string, value interface{})
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("%s %s from %s to %s", mode, path, from, to)
++		return fmt.Sprintf("%s %s from %s to %s", mode, path,
++			paramOverrideAuditPrefix(from, valueMaxRunes), paramOverrideAuditPrefix(to, valueMaxRunes))
+ 	case "set_header":
+ 		if path == "" {
+ 			return ""
+ 		}
+-		return fmt.Sprintf("set_header %s = %s", path, formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("set_header %s = %s", path, formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "delete_header":
+ 		if path == "" {
+ 			return ""
+ 		}
+ 		return fmt.Sprintf("delete_header %s", path)
+-	case "copy_header", "move_header":
+-		if from == "" || to == "" {
+-			return ""
+-		}
+-		return fmt.Sprintf("%s %s -> %s", mode, from, to)
+ 	case "pass_headers":
+-		return fmt.Sprintf("pass_headers %s", formatParamOverrideAuditValue(value))
+-	case "sync_fields":
+-		if from == "" || to == "" {
+-			return ""
+-		}
+-		return fmt.Sprintf("sync_fields %s -> %s", from, to)
++		return fmt.Sprintf("pass_headers %s", formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	case "return_error":
+-		return fmt.Sprintf("return_error %s", formatParamOverrideAuditValue(value))
++		return fmt.Sprintf("return_error %s", formatParamOverrideAuditValue(value, valueMaxRunes))
+ 	default:
+ 		if path == "" {
+ 			return mode
+diff --git a/relay/common/override_audit.go b/relay/common/override_audit.go
+new file mode 100644
+index 00000000..55fea6e5
+--- /dev/null
++++ b/relay/common/override_audit.go
+@@ -0,0 +1,169 @@
++package common
++
++import (
++	"slices"
++	"sort"
++	"strings"
++	"unicode/utf8"
++
++	"github.com/QuantumNous/new-api/common"
++)
++
++const (
++	paramOverrideAuditValueMaxRunes = 200
++	paramOverrideAuditMaxBytes      = 1024
++)
++
++type paramOverrideAuditRecorder struct {
++	lines     []string
++	jsonBytes int
++	full      bool
++}
++
++func (r *paramOverrideAuditRecorder) recordOperation(mode, path, from, to string, value interface{}) {
++	if r == nil || r.full {
++		return
++	}
++	line := buildParamOverrideAuditLine(mode, path, from, to, value, paramOverrideAuditValueMaxRunes)
++	if line == "" || slices.Contains(r.lines, line) {
++		return
++	}
++
++	available := paramOverrideAuditMaxBytes - r.jsonBytes
++	if len(r.lines) == 0 {
++		available -= 2 // 数组两端的方括号。
++	} else {
++		available-- // 新增行前的逗号。
++	}
++	if available <= 2 {
++		r.full = true
++		return
++	}
++
++	encoded, _ := common.Marshal(line) // 字符串序列化不会失败。
++	if len(encoded) > available {
++		r.full = true
++		// 总量不足时只缩短值预览，操作名和字段路径保持完整。
++		line = buildParamOverrideAuditLine(mode, path, from, to, value, 0)
++		encoded, _ = common.Marshal(line)
++		if len(encoded) > available {
++			return
++		}
++		low, high := 0, paramOverrideAuditValueMaxRunes
++		for low < high {
++			mid := (low + high + 1) / 2
++			candidate, _ := common.Marshal(buildParamOverrideAuditLine(mode, path, from, to, value, mid))
++			if len(candidate) <= available {
++				low = mid
++			} else {
++				high = mid - 1
++			}
++		}
++		line = buildParamOverrideAuditLine(mode, path, from, to, value, low)
++		if line == "" || slices.Contains(r.lines, line) {
++			return
++		}
++		encoded, _ = common.Marshal(line)
++	}
++	if len(r.lines) == 0 {
++		r.jsonBytes = 2
++	} else {
++		r.jsonBytes++
++	}
++	r.lines = append(r.lines, line)
++	r.jsonBytes += len(encoded)
++}
++
++func formatParamOverrideAuditValue(value interface{}, maxRunes int) string {
++	switch typed := value.(type) {
++	case nil:
++		return paramOverrideAuditPrefix("<empty>", maxRunes)
++	case string:
++		return paramOverrideAuditPrefix(typed, maxRunes)
++	default:
++		preview := paramOverrideAuditPreview{remaining: maxRunes}
++		preview.writeJSON(value)
++		return preview.text.String()
++	}
++}
++
++func paramOverrideAuditPrefix(text string, limit int) string {
++	for index := range text {
++		if limit == 0 {
++			return text[:index]
++		}
++		limit--
++	}
++	return text
++}
++
++type paramOverrideAuditPreview struct {
++	text      strings.Builder
++	remaining int
++}
++
++func (p *paramOverrideAuditPreview) write(text string) {
++	prefix := paramOverrideAuditPrefix(text, p.remaining)
++	p.text.WriteString(prefix)
++	p.remaining -= utf8.RuneCountInString(prefix)
++}
++
++// 只格式化审计需要的 JSON 前缀，避免为长 messages 再序列化一份完整提示词。
++func (p *paramOverrideAuditPreview) writeJSON(value interface{}) {
++	if p.remaining == 0 {
++		return
++	}
++	switch typed := value.(type) {
++	case string:
++		value = paramOverrideAuditPrefix(typed, p.remaining)
++	case map[string]interface{}:
++		if typed == nil {
++			break
++		}
++		p.write("{")
++		keys := make([]string, 0, len(typed))
++		for key := range typed {
++			keys = append(keys, key)
++		}
++		sort.Strings(keys)
++		for index, key := range keys {
++			if p.remaining == 0 {
++				return
++			}
++			if index > 0 {
++				p.write(",")
++			}
++			p.writeJSON(key)
++			p.write(":")
++			p.writeJSON(typed[key])
++		}
++		p.write("}")
++		return
++	case []interface{}:
++		writeParamOverrideAuditArray(p, typed)
++		return
++	case []string:
++		writeParamOverrideAuditArray(p, typed)
++		return
++	}
++	encoded, _ := common.Marshal(value)
++	p.write(string(encoded))
++}
++
++func writeParamOverrideAuditArray[T any](p *paramOverrideAuditPreview, items []T) {
++	if items == nil {
++		p.write("null")
++		return
++	}
++	p.write("[")
++	for index, item := range items {
++		if p.remaining == 0 {
++			return
++		}
++		if index > 0 {
++			p.write(",")
++		}
++		p.writeJSON(item)
++	}
++	p.write("]")
++}
+diff --git a/relay/common/override_audit_test.go b/relay/common/override_audit_test.go
+new file mode 100644
+index 00000000..fd2e96d3
+--- /dev/null
++++ b/relay/common/override_audit_test.go
+@@ -0,0 +1,238 @@
++package common
++
++import (
++	"fmt"
++	"slices"
++	"strings"
++	"testing"
++	"unicode/utf8"
++
++	common2 "github.com/QuantumNous/new-api/common"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestParamOverrideAuditTruncatesUnicodeValuesWithoutChangingRequests(t *testing.T) {
++	originalDebug := common2.DebugEnabled
++	common2.DebugEnabled = false
++	t.Cleanup(func() { common2.DebugEnabled = originalDebug })
++
++	longValue := strings.Repeat("界🙂", 130) + "完整尾部"
++	nestedText := "特殊\"\\\n<>&" + longValue
++	for _, test := range []struct {
++		name   string
++		mode   string
++		path   string
++		value  interface{}
++		legacy bool
++	}{
++		{name: "legacy string", path: "instructions", value: longValue, legacy: true},
++		{name: "operation string", path: "system", value: longValue},
++		{name: "prepend messages array", mode: "prepend", path: "messages", value: []interface{}{
++			map[string]interface{}{"role": "system", "content": nestedText},
++		}},
++		{name: "instruction object", path: "systemInstruction", value: map[string]interface{}{
++			"parts": []interface{}{map[string]interface{}{"text": nestedText}},
++		}},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			mode := test.mode
++			if mode == "" {
++				mode = "set"
++			}
++			override := map[string]interface{}{
++				"operations": []map[string]interface{}{{"mode": mode, "path": test.path, "value": test.value}},
++			}
++			if test.legacy {
++				override = map[string]interface{}{test.path: test.value}
++			}
++			configBefore, err := common2.Marshal(override)
++			require.NoError(t, err)
++			valueText, isString := test.value.(string)
++			if !isString {
++				encoded, err := common2.Marshal(test.value)
++				require.NoError(t, err)
++				valueText = string(encoded)
++			}
++			wantPreview := string([]rune(valueText)[:200])
++			info := &RelayInfo{ChannelMeta: &ChannelMeta{ParamOverride: override}}
++
++			output, err := ApplyParamOverrideWithRelayInfo([]byte(`{"model":"existing","messages":[{"role":"user","content":"question"}]}`), info)
++			require.NoError(t, err)
++			var request map[string]interface{}
++			require.NoError(t, common2.Unmarshal(output, &request))
++			wantValue := test.value
++			wantLine := "set " + test.path + " = " + wantPreview
++			if mode == "prepend" {
++				wantValue = append(slices.Clone(test.value.([]interface{})), map[string]interface{}{"role": "user", "content": "question"})
++				wantLine = "prepend " + test.path + " with " + wantPreview
++			}
++			assert.Equal(t, wantValue, request[test.path])
++			assert.Equal(t, "existing", request["model"])
++			assert.Equal(t, []string{wantLine}, info.ParamOverrideAudit)
++			configAfter, err := common2.Marshal(override)
++			require.NoError(t, err)
++			assert.Equal(t, configBefore, configAfter)
++		})
++	}
++}
++
++func TestParamOverrideAuditBoundsEscapedJSONAndKeepsApplyingOperations(t *testing.T) {
++	for _, debug := range []bool{false, true} {
++		t.Run(fmt.Sprintf("DEBUG=%t", debug), func(t *testing.T) {
++			originalDebug := common2.DebugEnabled
++			common2.DebugEnabled = debug
++			t.Cleanup(func() { common2.DebugEnabled = originalDebug })
++
++			container := "instructions"
++			if debug {
++				container = "metadata"
++			}
++			value := strings.Repeat("\"\\\n\t<>&\u2028🙂", 30)
++			operations := make([]map[string]interface{}, 0, 5)
++			for i := 0; i < 4; i++ {
++				operations = append(operations, map[string]interface{}{
++					"mode": "set", "path": fmt.Sprintf("%s.audit_%d", container, i), "value": value,
++				})
++			}
++			operations = append(operations, map[string]interface{}{"mode": "set", "path": "model", "value": "after-budget"})
++			info := &RelayInfo{ChannelMeta: &ChannelMeta{ParamOverride: map[string]interface{}{"operations": operations}}}
++
++			output, err := ApplyParamOverrideWithRelayInfo([]byte(`{"instructions":{},"metadata":{}}`), info)
++			require.NoError(t, err)
++			var request struct {
++				Instructions map[string]string `json:"instructions"`
++				Metadata     map[string]string `json:"metadata"`
++				Model        string            `json:"model"`
++			}
++			require.NoError(t, common2.Unmarshal(output, &request))
++			fields := request.Instructions
++			if debug {
++				fields = request.Metadata
++			}
++			for i := 0; i < 4; i++ {
++				assert.Equal(t, value, fields[fmt.Sprintf("audit_%d", i)])
++			}
++			assert.Equal(t, "after-budget", request.Model)
++
++			encoded, err := common2.Marshal(info.ParamOverrideAudit)
++			require.NoError(t, err)
++			assert.LessOrEqual(t, len(encoded), 1024)
++			var decoded []string
++			require.NoError(t, common2.Unmarshal(encoded, &decoded))
++			assert.Equal(t, info.ParamOverrideAudit, decoded)
++			require.Len(t, decoded, 2)
++			fullPreview := string([]rune(value)[:200])
++			for i, line := range decoded {
++				prefix := fmt.Sprintf("set %s.audit_%d = ", container, i)
++				require.True(t, strings.HasPrefix(line, prefix))
++				preview := strings.TrimPrefix(line, prefix)
++				assert.True(t, utf8.ValidString(preview))
++				assert.True(t, strings.HasPrefix(fullPreview, preview))
++				if i == 0 {
++					assert.Equal(t, fullPreview, preview)
++				} else {
++					assert.NotEmpty(t, preview)
++					assert.Less(t, utf8.RuneCountInString(preview), 200)
++				}
++			}
++		})
++	}
++}
++
++func TestParamOverrideAuditKeepsNullOperationAtByteLimit(t *testing.T) {
++	padding := strings.Repeat("<", 163)
++	info := &RelayInfo{ChannelMeta: &ChannelMeta{ParamOverride: map[string]interface{}{
++		"operations": []map[string]interface{}{
++			{"mode": "set", "path": "instructions", "value": padding},
++			{"mode": "set", "path": "system", "value": nil},
++		},
++	}}}
++
++	output, err := ApplyParamOverrideWithRelayInfo([]byte(`{"system":"previous"}`), info)
++	require.NoError(t, err)
++	assert.JSONEq(t, `{"system":null,"instructions":"`+padding+`"}`, string(output))
++	assert.Equal(t, []string{"set instructions = " + padding, "set system = <e"}, info.ParamOverrideAudit)
++	encoded, err := common2.Marshal(info.ParamOverrideAudit)
++	require.NoError(t, err)
++	assert.Len(t, encoded, 1024)
++}
++
++func TestParamOverrideAuditPreservesOperationFormatAndResetsRetryBudget(t *testing.T) {
++	originalDebug := common2.DebugEnabled
++	common2.DebugEnabled = false
++	t.Cleanup(func() { common2.DebugEnabled = originalDebug })
++
++	longValue := strings.Repeat("界🙂", 130)
++	info := &RelayInfo{ChannelMeta: &ChannelMeta{ParamOverride: map[string]interface{}{
++		"operations": []map[string]interface{}{
++			{"mode": "set", "path": "instructions", "value": longValue},
++			{"mode": "set", "path": "system", "value": longValue},
++		},
++	}}}
++	_, err := ApplyParamOverrideWithRelayInfo([]byte(`{}`), info)
++	require.NoError(t, err)
++	require.Len(t, info.ParamOverrideAudit, 2)
++	assert.Less(t, utf8.RuneCountInString(strings.TrimPrefix(info.ParamOverrideAudit[1], "set system = ")), 200)
++
++	key := strings.Repeat("p", 210)
++	path := "metadata." + key
++	info.ChannelMeta.ParamOverride = map[string]interface{}{
++		"operations": []map[string]interface{}{
++			{"mode": "set", "path": "instructions", "value": "short"},
++			{"mode": "set", "path": "instructions", "value": "short"},
++			{"mode": "copy", "from": "instructions", "to": path},
++			{"mode": "move", "from": path, "to": "system"},
++		},
++	}
++	wantAudit := []string{
++		"set instructions = short",
++		"copy instructions -> " + path,
++		"move " + path + " -> system",
++	}
++	for attempt := 0; attempt < 2; attempt++ {
++		output, err := ApplyParamOverrideWithRelayInfo([]byte(`{"model":"existing"}`), info)
++		require.NoError(t, err)
++		var request map[string]interface{}
++		require.NoError(t, common2.Unmarshal(output, &request))
++		assert.Equal(t, "short", request["instructions"])
++		assert.Equal(t, "short", request["system"])
++		assert.Equal(t, "existing", request["model"])
++		assert.NotContains(t, request["metadata"], key)
++		assert.Equal(t, wantAudit, info.ParamOverrideAudit)
++	}
++}
++
++func TestParamOverrideAuditTruncatesReplacementTextWithoutChangingReplacement(t *testing.T) {
++	originalDebug := common2.DebugEnabled
++	common2.DebugEnabled = false
++	t.Cleanup(func() { common2.DebugEnabled = originalDebug })
++
++	from := strings.Repeat(" ", 200) + "FROM-END"
++	to := "\t" + strings.Repeat("界🙂", 115) + "TO-END"
++	input, err := common2.Marshal(map[string]string{"instructions": "before:" + from + ":after"})
++	require.NoError(t, err)
++	for _, mode := range []string{"replace", "regex_replace"} {
++		t.Run(mode, func(t *testing.T) {
++			override := map[string]interface{}{
++				"operations": []map[string]interface{}{{"mode": mode, "path": "instructions", "from": from, "to": to}},
++			}
++			configBefore, err := common2.Marshal(override)
++			require.NoError(t, err)
++			info := &RelayInfo{ChannelMeta: &ChannelMeta{ParamOverride: override}}
++
++			output, err := ApplyParamOverrideWithRelayInfo(input, info)
++			require.NoError(t, err)
++			var request map[string]string
++			require.NoError(t, common2.Unmarshal(output, &request))
++			assert.Equal(t, "before:"+to+":after", request["instructions"])
++			assert.Equal(t, []string{mode + " instructions from " + string([]rune(from)[:200]) + " to " + string([]rune(to)[:200])}, info.ParamOverrideAudit)
++			encoded, err := common2.Marshal(info.ParamOverrideAudit)
++			require.NoError(t, err)
++			assert.LessOrEqual(t, len(encoded), 1024)
++			configAfter, err := common2.Marshal(override)
++			require.NoError(t, err)
++			assert.Equal(t, configBefore, configAfter)
++		})
++	}
++}
+diff --git a/scripts/verify_patches.sh b/scripts/verify_patches.sh
+index 416a7e9c..6a13d9f3 100644
+--- a/scripts/verify_patches.sh
++++ b/scripts/verify_patches.sh
+@@ -175,8 +175,8 @@ test_pids+=("$!")
+ run_replay_check "验证 004/007/008/009 Sora 与 Seedance 定制" \
+   go test ./relay/channel/task/sora -run '(ReferenceVideo|Seedance|Asset|Unknown|MissingVideoStatus|MissingStatus|StoredResultURL)' -count=1 &
+ test_pids+=("$!")
+-run_replay_check "验证 005 multipart 回归" \
+-  go test ./relay/common -run '^TestValidateBasicTaskRequest_MultipartWithMetadata$' -count=1 &
++run_replay_check "验证 005 multipart 与 015 参数覆盖审计预览" \
++  go test ./relay/common -run '^(TestValidateBasicTaskRequest_MultipartWithMetadata|TestParamOverrideAudit.*)$' -count=1 &
+ test_pids+=("$!")
+ run_replay_check "验证 006 双前端配置注入" \
+   go test . -run '^TestInjectFrontendLockPassword' -count=1 &
